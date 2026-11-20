@@ -1,7 +1,9 @@
 import sys
 import os
 import time
+import math
 import socket
+import struct
 import subprocess
 import threading
 import numpy as np
@@ -9,33 +11,43 @@ import pyaudiowpatch as pyaudio
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QComboBox, QSlider, QTextEdit, QProgressBar,
-    QSystemTrayIcon, QMenu, QGroupBox
+    QLabel, QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit,
+    QProgressBar, QSystemTrayIcon, QMenu, QGroupBox
 )
 from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont
 
 CREATE_NO_WINDOW = 0x08000000
+DEFAULT_PORT = 5000
+DEFAULT_RATE = 48000
+DEFAULT_CHANNELS = 2
+CLIP_THRESHOLD = 0.98
+
 
 def get_adb_path() -> str:
     base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     local_adb = os.path.join(base_dir, "adb", "adb.exe")
     return local_adb if os.path.exists(local_adb) else "adb"
 
+
 class WorkerSignals(QObject):
     log = Signal(str)
     status_changed = Signal(str, str, str)
     level_updated = Signal(float, bool)
+
 
 class AudioStreamWorker(threading.Thread):
     def __init__(self, signals: WorkerSignals):
         super().__init__(daemon=True)
         self.signals = signals
         self.running = True
+        self.paused = False
         self.force_reconnect = False
         self.device_index = None
-        self.chunk_frames = 512
-        self.tcp_port = 28200
+        self.chunk_ms = 15
+        self.tcp_port = DEFAULT_PORT
+        self.gain_linear = 1.0
+        self.soft_limiter = True
         self._lock = threading.Lock()
         self._sock = None
         self._stream = None
@@ -47,13 +59,25 @@ class AudioStreamWorker(threading.Thread):
                 self.device_index = device_index
                 self.force_reconnect = True
 
-    def set_latency_frames(self, frames: int):
+    def set_chunk_ms(self, ms: int):
         with self._lock:
-            if self.chunk_frames != frames:
-                self.chunk_frames = frames
+            if self.chunk_ms != ms:
+                self.chunk_ms = ms
                 self.force_reconnect = True
 
+    def set_gain_db(self, db: float):
+        self.gain_linear = math.pow(10.0, db / 20.0)
+
+    def set_soft_limiter(self, enabled: bool):
+        self.soft_limiter = enabled
+
+    def set_paused(self, paused: bool):
+        self.paused = paused
+        if paused:
+            self.force_reconnect = True
+
     def trigger_reconnect(self):
+        self.paused = False
         self.force_reconnect = True
 
     def stop(self):
@@ -94,17 +118,19 @@ class AudioStreamWorker(threading.Thread):
         except Exception as e:
             return -1, str(e)
 
-    def _check_android_device(self) -> str | None:
+    def _check_android_device(self) -> tuple[str, str | None]:
         code, out = self._run_adb(["devices"])
         if code != 0:
-            return None
+            return "error", out
         for line in out.splitlines()[1:]:
             parts = line.strip().split("	")
-            if len(parts) == 2 and parts[1] == "device":
-                serial = parts[0]
-                _, model = self._run_adb(["-s", serial, "shell", "getprop", "ro.product.model"])
-                return f"{model} ({serial})" if model else serial
-        return None
+            if len(parts) == 2:
+                serial, state = parts[0], parts[1]
+                if state == "device":
+                    _, model = self._run_adb(["-s", serial, "shell", "getprop", "ro.product.model"])
+                    return "device", f"{model} ({serial})" if model else serial
+                return state, serial
+        return "none", None
 
     def _setup_adb_forward(self, serial_info: str) -> bool:
         serial = serial_info.split("(")[-1].rstrip(")") if "(" in serial_info else serial_info
@@ -114,27 +140,59 @@ class AudioStreamWorker(threading.Thread):
             return False
         return True
 
+    def _process_audio(self, raw_data: bytes) -> tuple[bytes, float, bool]:
+        samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return raw_data, 0.0, False
+
+        g = self.gain_linear
+        if abs(g - 1.0) > 1e-4 or self.soft_limiter:
+            norm = (samples / 32768.0) * g
+            if self.soft_limiter:
+                norm = np.where(np.abs(norm) > 0.75, np.tanh(norm), norm)
+            clipping = bool(np.max(np.abs(norm)) >= CLIP_THRESHOLD)
+            clamped = np.clip(norm * 32767.0, -32768.0, 32767.0).astype(np.int16)
+            out_bytes = clamped.tobytes()
+            peak = float(np.max(np.abs(clamped))) / 32768.0
+        else:
+            out_bytes = raw_data
+            peak = float(np.max(np.abs(samples))) / 32768.0
+            clipping = peak >= CLIP_THRESHOLD
+
+        return out_bytes, min(100.0, peak * 100.0), clipping
+
     def run(self):
         last_state = ""
         while self.running:
+            if self.paused:
+                self._close_connections()
+                if last_state != "paused":
+                    self.signals.status_changed.emit("Detenido", "Transmision en pausa", "#95A5A6")
+                    last_state = "paused"
+                self.signals.level_updated.emit(0.0, False)
+                time.sleep(0.4)
+                continue
+
             self.force_reconnect = False
-            device_name = self._check_android_device()
-            if not device_name:
-                if last_state != "disconnected":
-                    self.signals.status_changed.emit("Desconectado", "Ningun dispositivo ADB", "#E74C3C")
-                    self.signals.log.emit("[ADB] Esperando dispositivo Android por USB...")
-                    last_state = "disconnected"
+            state, info = self._check_android_device()
+            if state != "device" or not info:
+                msg = "Autoriza depuracion USB en el movil" if state == "unauthorized" else "Ningun dispositivo ADB"
+                color = "#F39C12" if state == "unauthorized" else "#E74C3C"
+                if last_state != f"dev_{state}":
+                    self.signals.status_changed.emit("Esperando USB", msg, color)
+                    self.signals.log.emit(f"[ADB] {msg}...")
+                    last_state = f"dev_{state}"
                 self.signals.level_updated.emit(0.0, False)
                 time.sleep(1.5)
                 continue
 
-            if not self._setup_adb_forward(device_name):
+            if not self._setup_adb_forward(info):
                 time.sleep(1.5)
                 continue
 
             with self._lock:
                 dev_idx = self.device_index
-                frames = self.chunk_frames
+                chunk_ms = self.chunk_ms
 
             if dev_idx is None:
                 time.sleep(0.5)
@@ -142,14 +200,21 @@ class AudioStreamWorker(threading.Thread):
 
             try:
                 dev_info = self._pa.get_device_info_by_index(dev_idx)
-                rate = int(dev_info.get("defaultSampleRate", 48000))
-                ch = max(1, min(2, int(dev_info.get("maxInputChannels", 2))))
+                rate = int(dev_info.get("defaultSampleRate", DEFAULT_RATE))
+                ch = max(1, min(2, int(dev_info.get("maxInputChannels", DEFAULT_CHANNELS))))
+                frames = max(128, int(rate * chunk_ms / 1000))
 
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(3.0)
-                sock.connect(("127.0.0.1", self.tcp_port))
+                sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=3.0)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
                 self._sock = sock
+
+                ack = sock.recv(1)
+                if ack != b"R":
+                    raise ConnectionError("La app Android no respondio R")
+
+                sock.settimeout(None)
+                sock.sendall(struct.pack(">IBB", rate, ch, 16))
 
                 self._stream = self._pa.open(
                     format=pyaudio.paInt16,
@@ -160,26 +225,26 @@ class AudioStreamWorker(threading.Thread):
                     frames_per_buffer=frames
                 )
 
-                self.signals.status_changed.emit("Conectado", device_name, "#2ECC71")
-                if last_state != f"connected_{device_name}_{dev_idx}":
-                    self.signals.log.emit(f"[Audio] Transmitiendo {dev_info['name']} ({rate}Hz, {ch}ch) -> {device_name}")
-                    last_state = f"connected_{device_name}_{dev_idx}"
+                dev_title = dev_info["name"]
+                self.signals.status_changed.emit("Transmitiendo", f"{info} ({rate} Hz)", "#2ECC71")
+                if last_state != f"streaming_{info}_{dev_idx}_{chunk_ms}":
+                    self.signals.log.emit(f"[Audio] Transmitiendo {dev_title} ({rate}Hz, {ch}ch, {chunk_ms}ms) -> tcp:{self.tcp_port}")
+                    last_state = f"streaming_{info}_{dev_idx}_{chunk_ms}"
 
-                while self.running and not self.force_reconnect:
+                last_ui = 0.0
+                while self.running and not self.force_reconnect and not self.paused:
                     raw_data = self._stream.read(frames, exception_on_overflow=False)
-                    samples = np.frombuffer(raw_data, dtype=np.int16)
-                    if samples.size > 0:
-                        peak = np.max(np.abs(samples))
-                        clipping = bool(peak >= 32600)
-                        rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
-                        level_pct = min(100.0, (rms / 32768.0) * 100.0 * 3.5)
-                        self.signals.level_updated.emit(level_pct, clipping)
-                    self._sock.sendall(raw_data)
+                    out_bytes, lvl, clip = self._process_audio(raw_data)
+                    self._sock.sendall(out_bytes)
+                    now = time.monotonic()
+                    if (now - last_ui) >= 0.06:
+                        self.signals.level_updated.emit(lvl, clip)
+                        last_ui = now
 
-            except (ConnectionRefusedError, socket.timeout, BrokenPipeError, OSError) as e:
+            except (ConnectionRefusedError, ConnectionError, socket.timeout, BrokenPipeError, OSError) as e:
                 if last_state != "waiting_app":
-                    self.signals.status_changed.emit("Reconectando...", device_name, "#F39C12")
-                    self.signals.log.emit(f"[Stream] Reconexion silenciosa ({type(e).__name__})...")
+                    self.signals.status_changed.emit("Reconectando...", info, "#F39C12")
+                    self.signals.log.emit(f"[Stream] Esperando app Android en puerto {self.tcp_port} ({e})")
                     last_state = "waiting_app"
                 self._close_connections()
                 self.signals.level_updated.emit(0.0, False)
@@ -191,11 +256,12 @@ class AudioStreamWorker(threading.Thread):
             finally:
                 self._close_connections()
 
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SpeakerPhone-USB v4.0 (Windows)")
-        self.setMinimumSize(540, 460)
+        self.setMinimumSize(540, 520)
         self.signals = WorkerSignals()
         self.worker = AudioStreamWorker(self.signals)
         self._init_ui()
@@ -231,17 +297,20 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Iniciando...")
         self.status_label.setStyleSheet("font-weight: bold; font-size: 13px;")
         self.device_label = QLabel("Buscando dispositivo...")
-        self.btn_retry = QPushButton("Reintentar Conexion")
+        self.btn_retry = QPushButton("Reintentar")
+        self.btn_toggle = QPushButton("Detener")
         status_layout.addWidget(self.status_dot)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.device_label, 1)
         status_layout.addWidget(self.btn_retry)
+        status_layout.addWidget(self.btn_toggle)
         layout.addWidget(status_group)
 
-        audio_group = QGroupBox("Fuente de Audio y Latencia (WASAPI)")
+        audio_group = QGroupBox("Fuente de Audio, Ganancia y Latencia (WASAPI)")
         audio_layout = QVBoxLayout(audio_group)
+
         row_source = QHBoxLayout()
-        row_source.addWidget(QLabel("Fuente de audio:"))
+        row_source.addWidget(QLabel("Fuente:"))
         self.combo_devices = QComboBox()
         self.btn_refresh_dev = QPushButton("↻")
         self.btn_refresh_dev.setFixedWidth(32)
@@ -249,8 +318,22 @@ class MainWindow(QMainWindow):
         row_source.addWidget(self.btn_refresh_dev)
         audio_layout.addLayout(row_source)
 
+        row_gain = QHBoxLayout()
+        row_gain.addWidget(QLabel("Ganancia:"))
+        self.slider_gain = QSlider(Qt.Horizontal)
+        self.slider_gain.setRange(-120, 120)
+        self.slider_gain.setValue(0)
+        self.label_gain = QLabel("0.0 dB")
+        self.label_gain.setFixedWidth(52)
+        self.chk_limiter = QCheckBox("Limitador suave")
+        self.chk_limiter.setChecked(True)
+        row_gain.addWidget(self.slider_gain, 1)
+        row_gain.addWidget(self.label_gain)
+        row_gain.addWidget(self.chk_limiter)
+        audio_layout.addLayout(row_gain)
+
         row_meter = QHBoxLayout()
-        row_meter.addWidget(QLabel("Nivel de senal:"))
+        row_meter.addWidget(QLabel("Nivel:"))
         self.vu_meter = QProgressBar()
         self.vu_meter.setRange(0, 100)
         self.vu_meter.setTextVisible(False)
@@ -264,11 +347,12 @@ class MainWindow(QMainWindow):
         audio_layout.addLayout(row_meter)
 
         row_latency = QHBoxLayout()
-        row_latency.addWidget(QLabel("Tamano de bufer:"))
+        row_latency.addWidget(QLabel("Paquete USB:"))
         self.slider_latency = QSlider(Qt.Horizontal)
-        self.slider_latency.setRange(1, 8)
-        self.slider_latency.setValue(2)
-        self.label_latency = QLabel("512 frames (~10.7 ms)")
+        self.slider_latency.setRange(5, 40)
+        self.slider_latency.setValue(15)
+        self.label_latency = QLabel("15 ms")
+        self.label_latency.setFixedWidth(48)
         row_latency.addWidget(self.slider_latency, 1)
         row_latency.addWidget(self.label_latency)
         audio_layout.addLayout(row_latency)
@@ -303,9 +387,12 @@ class MainWindow(QMainWindow):
         self.signals.log.connect(lambda m: self.log_view.append(f"[{time.strftime('%H:%M:%S')}] {m}"))
         self.signals.status_changed.connect(self._update_status)
         self.signals.level_updated.connect(self._update_meter)
-        self.btn_retry.clicked.connect(self.worker.trigger_reconnect)
+        self.btn_retry.clicked.connect(self._on_retry)
+        self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_refresh_dev.clicked.connect(self._populate_audio_devices)
         self.combo_devices.currentIndexChanged.connect(self._on_device_changed)
+        self.slider_gain.valueChanged.connect(self._on_gain_changed)
+        self.chk_limiter.toggled.connect(self.worker.set_soft_limiter)
         self.slider_latency.valueChanged.connect(self._on_latency_changed)
 
     def _populate_audio_devices(self):
@@ -325,7 +412,8 @@ class MainWindow(QMainWindow):
             if dev["maxInputChannels"] > 0:
                 is_lb = dev.get("isLoopbackDevice", False)
                 prefix = "[Sistema / Loopback]" if is_lb else "[Microfono]"
-                self.combo_devices.addItem(f"{prefix} {dev['name']}", userData=i)
+                dev_name = dev["name"]
+                self.combo_devices.addItem(f"{prefix} {dev_name}", userData=i)
                 if is_lb and default_idx == 0:
                     default_idx = count
                 count += 1
@@ -339,11 +427,26 @@ class MainWindow(QMainWindow):
         if dev_idx is not None:
             self.worker.set_device(dev_idx)
 
-    def _on_latency_changed(self, step: int):
-        frames = step * 256
-        ms = (frames / 48000.0) * 1000.0
-        self.label_latency.setText(f"{frames} frames (~{ms:.1f} ms)")
-        self.worker.set_latency_frames(frames)
+    def _on_gain_changed(self, val: int):
+        db = val / 10.0
+        self.label_gain.setText(f"{db:+.1f} dB")
+        self.worker.set_gain_db(db)
+
+    def _on_latency_changed(self, ms: int):
+        self.label_latency.setText(f"{ms} ms")
+        self.worker.set_chunk_ms(ms)
+
+    def _on_retry(self):
+        self.btn_toggle.setText("Detener")
+        self.worker.trigger_reconnect()
+
+    def _on_toggle(self):
+        if self.worker.paused:
+            self.btn_toggle.setText("Detener")
+            self.worker.set_paused(False)
+        else:
+            self.btn_toggle.setText("Iniciar")
+            self.worker.set_paused(True)
 
     def _update_status(self, state: str, device_text: str, color_hex: str):
         self.status_dot.setStyleSheet(f"color: {color_hex}; font-size: 18px;")
@@ -374,6 +477,7 @@ class MainWindow(QMainWindow):
         self.worker.stop()
         self.tray_icon.hide()
         QApplication.quit()
+
 
 if __name__ == "__main__":
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
