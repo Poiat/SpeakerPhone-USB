@@ -1,0 +1,64 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.usbaudio"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="26"
+9        android:targetSdkVersion="34" />
+10    <!-- INTERNET es necesario para abrir un ServerSocket, aunque solo escucha en 127.0.0.1 (túnel ADB/USB) -->
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:4:5-67
+11-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+12-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:5:5-77
+12-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:5:22-74
+13    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+13-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:6:5-92
+13-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:6:22-89
+14    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+14-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:7:5-77
+14-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:7:22-74
+15
+16    <application
+16-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:9:5-28:19
+17        android:allowBackup="false"
+17-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:11:9-36
+18        android:debuggable="true"
+19        android:extractNativeLibs="false"
+20        android:label="USB Audio"
+20-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:10:9-34
+21        android:theme="@android:style/Theme.DeviceDefault" >
+21-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:12:9-59
+22        <activity
+22-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:14:9-22:20
+23            android:name="com.usbaudio.MainActivity"
+23-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:15:13-41
+24            android:exported="true"
+24-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:16:13-36
+25            android:launchMode="singleTask" >
+25-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:17:13-44
+26            <intent-filter>
+26-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:18:13-21:29
+27                <action android:name="android.intent.action.MAIN" />
+27-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:19:17-69
+27-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:19:25-66
+28
+29                <category android:name="android.intent.category.LAUNCHER" />
+29-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:20:17-77
+29-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:20:27-74
+30            </intent-filter>
+31        </activity>
+32
+33        <service
+33-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:24:9-27:61
+34            android:name="com.usbaudio.AudioStreamService"
+34-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:25:13-47
+35            android:exported="false"
+35-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:26:13-37
+36            android:foregroundServiceType="mediaPlayback" />
+36-->/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/AndroidManifest.xml:27:13-58
+37    </application>
+38
+39</manifest>

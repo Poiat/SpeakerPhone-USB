@@ -1,0 +1,7 @@
+com.usbaudio.app-pngs-0 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/generated/res/pngs/debug
+com.usbaudio.app-resValues-1 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/generated/res/resValues/debug
+com.usbaudio.app-packageDebugResources-2 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+com.usbaudio.app-packageDebugResources-3 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+com.usbaudio.app-debug-4 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/intermediates/merged_res/debug/mergeDebugResources
+com.usbaudio.app-debug-5 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/debug/res
+com.usbaudio.app-main-6 /home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/src/main/res
