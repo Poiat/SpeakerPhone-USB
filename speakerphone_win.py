@@ -162,7 +162,7 @@ class AudioStreamWorker(threading.Thread):
 
                 self.signals.status_changed.emit("Conectado", device_name, "#2ECC71")
                 if last_state != f"connected_{device_name}_{dev_idx}":
-                    self.signals.log.emit(f"[Audio] Transmitiendo {dev_info["name"]} ({rate}Hz, {ch}ch) -> {device_name}")
+                    self.signals.log.emit(f"[Audio] Transmitiendo {dev_info['name']} ({rate}Hz, {ch}ch) -> {device_name}")
                     last_state = f"connected_{device_name}_{dev_idx}"
 
                 while self.running and not self.force_reconnect:
@@ -300,7 +300,7 @@ class MainWindow(QMainWindow):
         self.tray_icon.show()
 
     def _connect_signals(self):
-        self.signals.log.connect(lambda m: self.log_view.append(f"[{time.strftime("%H:%M:%S")}] {m}"))
+        self.signals.log.connect(lambda m: self.log_view.append(f"[{time.strftime('%H:%M:%S')}] {m}"))
         self.signals.status_changed.connect(self._update_status)
         self.signals.level_updated.connect(self._update_meter)
         self.btn_retry.clicked.connect(self.worker.trigger_reconnect)
@@ -325,7 +325,7 @@ class MainWindow(QMainWindow):
             if dev["maxInputChannels"] > 0:
                 is_lb = dev.get("isLoopbackDevice", False)
                 prefix = "[Sistema / Loopback]" if is_lb else "[Microfono]"
-                self.combo_devices.addItem(f"{prefix} {dev["name"]}", userData=i)
+                self.combo_devices.addItem(f"{prefix} {dev['name']}", userData=i)
                 if is_lb and default_idx == 0:
                     default_idx = count
                 count += 1
