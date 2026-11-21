@@ -646,7 +646,7 @@ class StreamController:
                 if need_meter:
                     if clip:
                         clip_hold_until = now + 0.65
-                    self.on_level(lvl, now < clip_hold_until)
+                    self.on_level(float(lvl), bool(now < clip_hold_until))
                     last_ui_push = now
         finally:
             self._abort_active_io()
@@ -727,7 +727,7 @@ def run_qt_app(qt_binding):
             self.bridge.status_sig.connect(self._update_status)
             self.bridge.device_sig.connect(self._update_device)
             self.bridge.log_sig.connect(self._append_log)
-            self.bridge.level_sig.connect(self._update_level)
+            self.bridge.level_sig.connect(self._update_level, Qt.ConnectionType.QueuedConnection)
 
             self.controller = StreamController(
                 on_status=self.bridge.status_sig.emit,
