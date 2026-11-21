@@ -355,7 +355,7 @@ class StreamController:
         self._abort_active_io()
         self._cleanup_virtual_sink()
         self._remove_adb_forward()
-        self.on_level(0.0, False)
+        self.on_level(0.0, 0)
         self.on_status("stopped", "Desconectado (transmisión detenida)")
         self.on_log("Transmisión detenida.")
 
@@ -365,7 +365,7 @@ class StreamController:
             self._abort_active_io()
             self._cleanup_virtual_sink()
             self._remove_adb_forward()
-            self.on_level(0.0, False)
+            self.on_level(0.0, 0)
             self.on_status("stopped", "En pausa por suspensión del sistema")
 
     def silent_reconnect(self):
@@ -381,7 +381,7 @@ class StreamController:
         self._suspended = False
         self._abort_active_io()
         self._remove_adb_forward()
-        self.on_level(0.0, False)
+        self.on_level(0.0, 0)
         if not self._running:
             self.start()
         else:
@@ -566,7 +566,7 @@ class StreamController:
             except Exception as e:
                 self._abort_active_io()
                 self._cleanup_virtual_sink()
-                self.on_level(0.0, False)
+                self.on_level(0.0, 0)
                 if not self._running or self._stop_event.is_set():
                     break
                 if self._suspended:
@@ -646,12 +646,12 @@ class StreamController:
                 if need_meter:
                     if clip:
                         clip_hold_until = now + 0.65
-                    self.on_level(float(lvl), bool(now < clip_hold_until))
+                    self.on_level(float(lvl), 1 if (now < clip_hold_until) else 0)
                     last_ui_push = now
         finally:
             self._abort_active_io()
             self._cleanup_virtual_sink()
-            self.on_level(0.0, False)
+            self.on_level(0.0, 0)
 
 
 def run_qt_app(qt_binding):
@@ -708,7 +708,7 @@ def run_qt_app(qt_binding):
         status_sig = Signal(str, str)
         device_sig = Signal(str, str)
         log_sig = Signal(str)
-        level_sig = Signal(float, bool)
+        level_sig = Signal(float, int)
 
     class MainWindow(QWidget):
         def __init__(self, app):
@@ -1094,6 +1094,7 @@ def run_qt_app(qt_binding):
             self._refresh_tray_icon()
 
         def _update_level(self, level, clipping):
+            clipping = bool(clipping)
             self.level_bar.setValue(int(level * 100))
             if clipping != self._is_clipping:
                 self._is_clipping = clipping

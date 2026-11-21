@@ -130,7 +130,7 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en v4.0.10
+          ### Novedades en v4.0.11
 
           - **Estabilidad en Linux (AppImage / PySide6):** Cast explícito a `float`/`bool` nativos en `level_sig` y conexión con `Qt.ConnectionType.QueuedConnection` para evitar `bool_dealloc` (`SIGABRT`) durante la transmisión de audio.
           - **App Android (`SpeakerPhone-USB-Android.apk`):** Interfaz oscura con indicador de versión, selector de búfer (`24 ms`, `36 ms`, `48 ms`), visualización del dispositivo de salida/conexión activo y telemetría de formato e *underruns*.
