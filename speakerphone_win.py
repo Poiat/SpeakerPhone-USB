@@ -18,6 +18,7 @@ from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont
 
 CREATE_NO_WINDOW = 0x08000000
+os.environ.setdefault("ANDROID_ADB_SERVER_PORT", "5038")
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
 DEFAULT_CHANNELS = 2
