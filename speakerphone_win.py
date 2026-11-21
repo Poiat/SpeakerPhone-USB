@@ -11,6 +11,7 @@ import threading
 import numpy as np
 import pyaudiowpatch as pyaudio
 
+import PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit,
@@ -604,6 +605,7 @@ if __name__ == "__main__":
     setup_logging()
     install_exception_hooks()
     log_startup_info()
+    log(f"Interfaz Qt: PySide6 {getattr(PySide6, '__version__', 'desconocida')}")
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

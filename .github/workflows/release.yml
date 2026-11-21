@@ -37,6 +37,9 @@ jobs:
       run: brew install portaudio
     - name: Deps Python
       run: python -m pip install --upgrade pip && pip install pyinstaller -r requirements.txt
+    - name: Verificar version de PySide6
+      run: |
+        python -c "import sys, PySide6; v=tuple(map(int, PySide6.__version__.split('.')[:2])); print('PySide6', PySide6.__version__, '| Python', sys.version.split()[0]); assert not (v >= (6, 12) and sys.version_info < (3, 12)), 'PySide6 >= 6.12 con Python < 3.12 causa bool_dealloc en Signal.emit()'"
     - name: Build Win/Mac
       if: runner.os != 'Linux'
       shell: bash
@@ -130,9 +133,9 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en v4.0.14
+          ### Novedades en v4.0.15
 
-          - **Logs persistentes en disco (Linux, Windows y macOS):** todas las líneas del visor de registros se guardan en `speakerphone.log` con rotación de 2 MB por archivo (5 copias). Ubicaciones: `~/.local/state/SpeakerPhone-USB/logs/` en Linux, `%LOCALAPPDATA%\SpeakerPhone-USB\logs\` en Windows y `~/Library/Logs/SpeakerPhone-USB/` en macOS. Se puede cambiar con la variable `SPEAKERPHONE_LOG_DIR`.
-          - **Diagnóstico de fallos:** se registran las excepciones no controladas del hilo principal y de los hilos de trabajo, junto con información del sistema y versión de Python al arrancar.
-          - **Acceso rápido:** nuevo botón **“Abrir carpeta”** en el visor de logs de las tres aplicaciones de escritorio. Si la carpeta preferida no es escribible, se usa una ubicación temporal como respaldo.
+          - **Corregido el crash `bool_dealloc` / SIGABRT (exit 134) en Linux/AppImage:** los binarios recientes se compilaban con PySide6 6.12.0, versión que tiene una regresión de refcount en `Signal.emit()`: cada emisión resta una referencia a `True` y, con Python 3.11, el proceso aborta tras unos minutos de transmisión. Ahora `requirements.txt` fija `PySide6==6.11.2` (verificada) y el CI comprueba la versión antes de compilar para impedir que vuelva a colarse una versión afectada. El mismo pin protege las compilaciones de Windows y macOS.
+          - **Diagnóstico:** el log en disco registra el binding Qt y su versión al arrancar (por ejemplo, `Interfaz Qt: PySide6 6.11.2`).
+          - **Nota:** cualquier AppImage compilado desde octubre de 2026 empaqueta PySide6 6.12.0 y puede abortar; si usas una versión anterior a este release, descárgalo de nuevo.
         files: artifacts/*

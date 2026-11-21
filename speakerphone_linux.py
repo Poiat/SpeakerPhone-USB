@@ -74,6 +74,25 @@ def check_dependencies():
     return [tool for tool in ("adb", "parec", "pactl") if not shutil.which(tool)]
 
 
+def qt_binding_version(binding):
+    """Devuelve la versión del binding Qt indicado, o 'desconocida'."""
+    try:
+        module = __import__(binding)
+        version = getattr(module, "__version__", None)
+        if version:
+            return str(version)
+        core = __import__(
+            f"{binding}.QtCore", fromlist=["PYQT_VERSION_STR", "__version__"]
+        )
+        for attr in ("PYQT_VERSION_STR", "__version__"):
+            value = getattr(core, attr, None)
+            if value:
+                return str(value)
+    except Exception:
+        pass
+    return "desconocida"
+
+
 def check_adb_health():
     """
     Comprueba si ADB está instalado y realmente funciona (binario ejecutable y
@@ -747,6 +766,10 @@ def run_qt_app(qt_binding):
         return ico
 
     class Bridge(QObject):
+        # Estas señales se emiten desde hilos Python hacia el hilo de la GUI.
+        # PySide6 6.12.0 tiene una regresión de refcount en Signal.emit() que
+        # provoca "Fatal Python error: bool_dealloc" con Python < 3.12; por eso
+        # requirements.txt fija PySide6==6.11.2.
         status_sig = Signal(str, str)
         device_sig = Signal(str, str)
         log_sig = Signal(str)
@@ -1692,10 +1715,12 @@ def main():
     for binding in ("PySide6", "PyQt6"):
         try:
             __import__(binding)
+            log(f"Interfaz Qt: {binding} {qt_binding_version(binding)}")
             run_qt_app(binding)
             return
         except ImportError:
             continue
+    log("Interfaz Qt no disponible; usando la interfaz Tk.")
     run_tk_app()
 
 
