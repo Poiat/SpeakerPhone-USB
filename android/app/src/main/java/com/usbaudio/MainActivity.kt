@@ -27,10 +27,18 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
     companion object {
-        const val APP_VERSION = "v4.0.11"
+        const val APP_VERSION = "v4.0.16"
         private const val PREFS_NAME = "usbaudio_prefs"
         private const val KEY_BUFFER_MS = "buffer_ms"
-        private val BUFFER_OPTIONS = listOf(24, 36, 48)
+
+        private data class BufferProfile(val ms: Int, val title: String, val description: String)
+
+        private val BUFFER_PROFILES = listOf(
+            BufferProfile(24, "Baja latencia", "Mínima latencia (juegos)"),
+            BufferProfile(36, "Equilibrado", "Balance latencia/estabilidad"),
+            BufferProfile(48, "Alta estabilidad", "Mayor margen contra cortes USB"),
+        )
+        private val BUFFER_OPTIONS = BUFFER_PROFILES.map { it.ms }
     }
 
     private lateinit var dotView: View
@@ -216,19 +224,19 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(10) }
         }
-        BUFFER_OPTIONS.forEachIndexed { idx, ms ->
+        BUFFER_PROFILES.forEachIndexed { idx, profile ->
             val btn = Button(this).apply {
-                text = "$ms ms"
-                textSize = 13f
+                text = "${profile.title}\n${profile.ms} ms"
+                textSize = 11f
                 isAllCaps = false
                 setTypeface(null, Typeface.BOLD)
-                setPadding(dp(8), dp(10), dp(8), dp(10))
+                setPadding(dp(6), dp(10), dp(6), dp(10))
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                     if (idx > 0) marginStart = dp(8)
                 }
-                setOnClickListener { selectBuffer(ms) }
+                setOnClickListener { selectBuffer(profile.ms) }
             }
-            bufferButtons[ms] = btn
+            bufferButtons[profile.ms] = btn
             bufRow.addView(btn)
         }
         bufferCard.addView(bufRow)
@@ -305,17 +313,18 @@ class MainActivity : Activity() {
     }
 
     private fun updateBufferButtons() {
-        BUFFER_OPTIONS.forEach { ms ->
-            val active = ms == selectedBufferMs
-            bufferButtons[ms]?.apply {
+        BUFFER_PROFILES.forEach { profile ->
+            val active = profile.ms == selectedBufferMs
+            bufferButtons[profile.ms]?.apply {
                 background = if (active) roundRect("#1D4ED8", "#3B82F6", 12) else roundRect("#0F172A", "#1E293B", 12)
                 setTextColor(if (active) Color.WHITE else Color.parseColor("#94A3B8"))
             }
         }
-        bufferInfo.text = when (selectedBufferMs) {
-            24 -> "24 ms · Mínima latencia (juegos)"
-            36 -> "36 ms · Equilibrio latencia/estabilidad"
-            else -> "48 ms · Mayor margen contra cortes USB"
+        val profile = BUFFER_PROFILES.firstOrNull { it.ms == selectedBufferMs }
+        bufferInfo.text = if (profile != null) {
+            "${profile.title} · ${profile.ms} ms · ${profile.description}"
+        } else {
+            "${selectedBufferMs} ms · Perfil personalizado"
         }
     }
 

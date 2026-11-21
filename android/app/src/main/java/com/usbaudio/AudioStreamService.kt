@@ -38,7 +38,7 @@ class AudioStreamService : Service() {
         private const val NOTIF_ID = 1
 
         const val CHUNK_MS = 10
-        const val TRACK_BUFFER_MS = 24
+        const val TRACK_BUFFER_MS = 36  // Perfil "Equilibrado" por defecto
         const val MAX_BACKLOG_MS = 80
 
         @Volatile var running = false

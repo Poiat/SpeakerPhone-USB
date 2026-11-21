@@ -133,9 +133,12 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en v4.0.15
+          ### Novedades en v4.0.16
 
-          - **Corregido el crash `bool_dealloc` / SIGABRT (exit 134) en Linux/AppImage:** los binarios recientes se compilaban con PySide6 6.12.0, versión que tiene una regresión de refcount en `Signal.emit()`: cada emisión resta una referencia a `True` y, con Python 3.11, el proceso aborta tras unos minutos de transmisión. Ahora `requirements.txt` fija `PySide6==6.11.2` (verificada) y el CI comprueba la versión antes de compilar para impedir que vuelva a colarse una versión afectada. El mismo pin protege las compilaciones de Windows y macOS.
-          - **Diagnóstico:** el log en disco registra el binding Qt y su versión al arrancar (por ejemplo, `Interfaz Qt: PySide6 6.11.2`).
-          - **Nota:** cualquier AppImage compilado desde octubre de 2026 empaqueta PySide6 6.12.0 y puede abortar; si usas una versión anterior a este release, descárgalo de nuevo.
+          - **Perfiles de búfer unificados entre Android y las apps de PC:** las cuatro aplicaciones usan ahora los mismos tres perfiles con idénticos nombres y descripciones:
+            - **Baja latencia · Mínima latencia (juegos):** paquete de 8 ms en PC, búfer de reproducción de 24 ms en Android.
+            - **Equilibrado · Balance latencia/estabilidad:** 15 ms en PC, 36 ms en Android (perfil por defecto en todas las apps).
+            - **Alta estabilidad · Mayor margen contra cortes USB:** 30 ms en PC, 48 ms en Android.
+          - **Windows y macOS:** el slider suelto de 5–40 ms se sustituye por un selector con los tres perfiles, igual que en Linux.
+          - **Android:** los botones muestran el nombre del perfil y su búfer, y la app arranca en Equilibrado (36 ms) para coincidir con el default de PC. La versión mostrada pasa a v4.0.16.
         files: artifacts/*

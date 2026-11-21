@@ -6,7 +6,7 @@ Novedades v4:
 - Mejoras de audio:
   * Control de Ganancia (-12 dB a +6 dB) y Limitador Suave (Soft Limiter) en tiempo real para evitar distorsión/clipping
   * Selector de frecuencia de muestreo (Nativa de PipeWire, 44100 Hz, 48000 Hz, 96000 Hz)
-  * Perfiles de latencia/estabilidad (Baja latencia 8ms, Equilibrado 15ms, Música sin cortes 30ms) + ajuste manual
+  * Perfiles de latencia/estabilidad (Baja latencia 8 ms, Equilibrado 15 ms, Alta estabilidad 30 ms) + ajuste manual
 - Funcionalidad:
   * Reconexión silenciosa automática al suspender/reanudar (systemd-logind D-Bus / gdbus / dbus-monitor) o desbloquear pantalla
 - Interfaz (UI):
@@ -998,9 +998,13 @@ def run_qt_app(qt_binding):
 
             prof_lbl = QLabel("Perfil:")
             self.profile_combo = QComboBox()
-            self.profile_combo.addItem("Equilibrado (15 ms)", (15, 15))
             self.profile_combo.addItem("Baja latencia (8 ms)", (8, 8))
-            self.profile_combo.addItem("Alta estabilidad / Música (30 ms)", (30, 25))
+            self.profile_combo.addItem("Equilibrado (15 ms)", (15, 15))
+            self.profile_combo.addItem("Alta estabilidad (30 ms)", (30, 30))
+            self.profile_combo.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
+            self.profile_combo.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
+            self.profile_combo.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
+            self.profile_combo.setCurrentIndex(1)
             self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
 
             cap_lbl = QLabel("Captura:")
@@ -1530,6 +1534,18 @@ def run_tk_app():
     gain_var = tk.DoubleVar(value=0.0)
     lim_var = tk.BooleanVar(value=True)
 
+    profile_row = tk.Frame(cfg, bg="#1f232b")
+    profile_row.pack(fill="x", padx=14, pady=(0, 8))
+    tk.Label(profile_row, text="Perfil:", bg="#1f232b", fg="#cfd5e2").pack(side="left")
+    profile_map = {
+        "Baja latencia (8 ms)": (8, 8),
+        "Equilibrado (15 ms)": (15, 15),
+        "Alta estabilidad (30 ms)": (30, 30),
+    }
+    profile_combo = ttk.Combobox(profile_row, state="readonly", values=list(profile_map.keys()))
+    profile_combo.current(1)
+    profile_combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
     lat_frame = tk.Frame(cfg, bg="#1f232b")
     lat_frame.pack(fill="x", padx=14, pady=(0, 10))
     tk.Label(lat_frame, text="Captura:", bg="#1f232b", fg="#cfd5e2").pack(side="left")
@@ -1657,6 +1673,17 @@ def run_tk_app():
 
     src_combo.bind("<<ComboboxSelected>>", lambda _e: ctrl.set_source_mode(sources_map.get(src_combo.get(), "__default__")))
     rate_combo.bind("<<ComboboxSelected>>", lambda _e: ctrl.set_rate_mode("native" if rate_combo.get() == "Nativa" else rate_combo.get()))
+
+    def on_profile_selected(_event):
+        vals = profile_map.get(profile_combo.get())
+        if vals:
+            cap_spin.delete(0, "end")
+            cap_spin.insert(0, str(vals[0]))
+            chk_spin.delete(0, "end")
+            chk_spin.insert(0, str(vals[1]))
+            ctrl.set_latency(*vals)
+
+    profile_combo.bind("<<ComboboxSelected>>", on_profile_selected)
     tk.Button(lat_frame, text="Aplicar", bg="#282d37", fg="#e6e8ee", relief="flat",
               command=lambda: ctrl.set_latency(cap_spin.get(), chk_spin.get())).pack(side="right")
 

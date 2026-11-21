@@ -429,14 +429,16 @@ class MainWindow(QMainWindow):
         audio_layout.addLayout(row_meter)
 
         row_latency = QHBoxLayout()
-        row_latency.addWidget(QLabel("Paquete USB:"))
-        self.slider_latency = QSlider(Qt.Horizontal)
-        self.slider_latency.setRange(5, 40)
-        self.slider_latency.setValue(15)
-        self.label_latency = QLabel("15 ms")
-        self.label_latency.setFixedWidth(48)
-        row_latency.addWidget(self.slider_latency, 1)
-        row_latency.addWidget(self.label_latency)
+        row_latency.addWidget(QLabel("Perfil de búfer:"))
+        self.combo_profile = QComboBox()
+        self.combo_profile.addItem("Baja latencia (8 ms)", 8)
+        self.combo_profile.addItem("Equilibrado (15 ms)", 15)
+        self.combo_profile.addItem("Alta estabilidad (30 ms)", 30)
+        self.combo_profile.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
+        self.combo_profile.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
+        self.combo_profile.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
+        self.combo_profile.setCurrentIndex(1)
+        row_latency.addWidget(self.combo_profile, 1)
         audio_layout.addLayout(row_latency)
         layout.addWidget(audio_group)
 
@@ -484,7 +486,7 @@ class MainWindow(QMainWindow):
         self.combo_devices.currentIndexChanged.connect(self._on_device_changed)
         self.slider_gain.valueChanged.connect(self._on_gain_changed)
         self.chk_limiter.toggled.connect(self.worker.set_soft_limiter)
-        self.slider_latency.valueChanged.connect(self._on_latency_changed)
+        self.combo_profile.currentIndexChanged.connect(self._on_profile_changed)
 
     def _populate_audio_devices(self):
         self.combo_devices.blockSignals(True)
@@ -523,9 +525,10 @@ class MainWindow(QMainWindow):
         self.label_gain.setText(f"{db:+.1f} dB")
         self.worker.set_gain_db(db)
 
-    def _on_latency_changed(self, ms: int):
-        self.label_latency.setText(f"{ms} ms")
-        self.worker.set_chunk_ms(ms)
+    def _on_profile_changed(self, idx: int):
+        ms = self.combo_profile.itemData(idx)
+        if ms:
+            self.worker.set_chunk_ms(int(ms))
 
     def _on_retry(self):
         self.btn_toggle.setText("Detener")
