@@ -9,11 +9,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
 import android.util.Log
@@ -37,7 +42,8 @@ class AudioStreamService : Service() {
         private const val CHANNEL_ID = "usb_audio"
         private const val NOTIF_ID = 1
 
-        const val CHUNK_MS = 10
+        const val PROTOCOL_VERSION = 1
+        const val HEADER_SIZE = 11
         const val TRACK_BUFFER_MS = 36  // Perfil "Equilibrado" por defecto
         const val MAX_BACKLOG_MS = 80
 
@@ -53,6 +59,12 @@ class AudioStreamService : Service() {
     @Volatile private var client: Socket? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var trackBufferMs: Int = TRACK_BUFFER_MS
+    @Volatile private var audioFocusRequest: AudioFocusRequest? = null
+    private var deviceCallback: AudioDeviceCallback? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val audioManager: AudioManager by lazy {
+        getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -69,6 +81,8 @@ class AudioStreamService : Service() {
 
         showForeground()
         acquireWakeLock()
+        requestAudioFocus()
+        registerAudioDeviceCallback()
         if (!running) {
             running = true
             worker = Thread({ serve() }, "usb-audio").also { it.start() }
@@ -87,6 +101,8 @@ class AudioStreamService : Service() {
         try { server?.close() } catch (_: IOException) {}
         worker?.interrupt()
         releaseWakeLock()
+        abandonAudioFocus()
+        unregisterAudioDeviceCallback()
         broadcastStatus()
         super.onDestroy()
     }
@@ -99,7 +115,8 @@ class AudioStreamService : Service() {
             }
         }
         if (wakeLock?.isHeld == false) {
-            try { wakeLock?.acquire(6 * 60 * 60 * 1000L) } catch (_: Exception) {}
+            // Servicio en primer plano: mantener la CPU despierta hasta onDestroy.
+            try { wakeLock?.acquire() } catch (_: Exception) {}
         }
     }
 
@@ -107,6 +124,74 @@ class AudioStreamService : Service() {
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (_: Exception) {}
+    }
+
+    private fun requestAudioFocus(): Boolean {
+        if (audioFocusRequest != null) return true
+        val attributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(attributes)
+            .setOnAudioFocusChangeListener { change ->
+                when (change) {
+                    AudioManager.AUDIOFOCUS_LOSS,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+                        audioFocusRequest = null
+                        try { client?.close() } catch (_: IOException) {}
+                        updateNotification("Audio pausado: otra aplicación usa la salida")
+                        broadcastStatus()
+                    }
+                    AudioManager.AUDIOFOCUS_GAIN -> {
+                        updateNotification("Esperando audio del PC (${trackBufferMs} ms)…")
+                        broadcastStatus()
+                    }
+                }
+            }
+            .build()
+        val granted = audioManager.requestAudioFocus(request) ==
+            AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if (granted) {
+            audioFocusRequest = request
+            return true
+        }
+        Log.w(TAG, "No se concedió el audio focus")
+        return false
+    }
+
+    private fun abandonAudioFocus() {
+        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        audioFocusRequest = null
+    }
+
+    private fun registerAudioDeviceCallback() {
+        if (deviceCallback != null) return
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                if (addedDevices?.any { it.isSink } == true) restartForRouteChange()
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                if (removedDevices?.any { it.isSink } == true) restartForRouteChange()
+            }
+        }
+        deviceCallback = callback
+        audioManager.registerAudioDeviceCallback(callback, mainHandler)
+    }
+
+    private fun unregisterAudioDeviceCallback() {
+        deviceCallback?.let { audioManager.unregisterAudioDeviceCallback(it) }
+        deviceCallback = null
+    }
+
+    private fun restartForRouteChange() {
+        if (!streaming) return
+        try { client?.close() } catch (_: IOException) {}
+        updateNotification("Salida de audio cambiada; reconectando…")
+        broadcastStatus()
     }
 
     private fun broadcastStatus() {
@@ -144,21 +229,34 @@ class AudioStreamService : Service() {
     }
 
     private fun handle(c: Socket) {
+        if (!requestAudioFocus()) {
+            Log.w(TAG, "Sesión rechazada: sin audio focus")
+            return
+        }
         c.tcpNoDelay = true
         c.soTimeout = 3000
         c.receiveBufferSize = 16 * 1024
         val din = DataInputStream(c.getInputStream())
         c.getOutputStream().apply { write(82); flush() }
 
-        val hdr = ByteArray(6)
+        val hdr = ByteArray(HEADER_SIZE)
         din.readFully(hdr)
-        val bb = ByteBuffer.wrap(hdr)
+        require(hdr[0] == 'U'.code.toByte() && hdr[1] == 'A'.code.toByte()) {
+            "Protocolo no compatible (magic invalido)"
+        }
+        val protocolVersion = hdr[2].toInt() and 0xFF
+        require(protocolVersion == PROTOCOL_VERSION) {
+            "Version de protocolo no soportada: $protocolVersion"
+        }
+        val bb = ByteBuffer.wrap(hdr, 3, HEADER_SIZE - 3)
         val rate = bb.int
-        val channels = hdr[4].toInt() and 0xFF
-        val bits = hdr[5].toInt() and 0xFF
+        val channels = bb.get().toInt() and 0xFF
+        val bits = bb.get().toInt() and 0xFF
+        val chunkMs = bb.short.toInt() and 0xFFFF
         require(rate in 8000..192000) { "Rate invalido: $rate" }
         require(channels == 1 || channels == 2) { "Canales invalidos: $channels" }
         require(bits == 16) { "Bits invalidos: $bits" }
+        require(chunkMs in 2..100) { "Chunk invalido: $chunkMs" }
 
         val frameBytes = channels * 2
         val fmtLabel = "$rate Hz · ${if (channels == 1) "Mono" else "Estéreo"}"
@@ -167,8 +265,9 @@ class AudioStreamService : Service() {
         broadcastStatus()
 
         val track = createTrack(rate, channels)
-        val chunk = frameBytes * rate * CHUNK_MS / 1000
-        val maxBacklog = frameBytes * rate * MAX_BACKLOG_MS / 1000
+        val chunk = frameBytes * rate * chunkMs / 1000
+        val backlogMs = maxOf(MAX_BACKLOG_MS, chunkMs * 2)
+        val maxBacklog = frameBytes * rate * backlogMs / 1000
         val buf = ByteArray(chunk)
         updateNotification("Reproduciendo · $fmtLabel (${trackBufferMs} ms)")
         try {

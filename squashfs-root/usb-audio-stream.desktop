@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=USB Audio Stream
-Comment=Transmite el audio de PipeWire a Android por cable USB
-Exec=AppRun
-Icon=usb-audio-stream
-Categories=AudioVideo;Audio;Utility;
-Terminal=false
-StartupNotify=true

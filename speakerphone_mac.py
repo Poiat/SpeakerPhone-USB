@@ -5,10 +5,8 @@ import time
 import math
 import shutil
 import socket
-import struct
 import subprocess
 import threading
-import numpy as np
 import pyaudio
 
 import PySide6
@@ -17,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit,
     QProgressBar, QSystemTrayIcon, QMenu, QGroupBox
 )
-from PySide6.QtCore import Qt, Signal, QObject, QUrl
+from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont, QDesktopServices
 
 from app_logger import (
@@ -29,13 +27,15 @@ from app_logger import (
     setup_logging,
 )
 from app_icon import get_icon_path
+from app_settings import load_settings, save_settings
 from app_version import APP_VERSION
+from dsp import process_pcm_s16le
+from protocol import pack_header
 from update_checker import RELEASES_URL, check_for_update
 
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
 DEFAULT_CHANNELS = 2
-CLIP_THRESHOLD = 0.98
 
 
 def get_adb_path() -> str:
@@ -186,15 +186,27 @@ class AudioStreamWorker(threading.Thread):
         code, out = self._run_adb(["devices"])
         if code != 0:
             return "error", out
+
+        devices = []
         for line in out.splitlines()[1:]:
-            parts = line.strip().split("	")
-            if len(parts) == 2:
-                serial, state = parts[0], parts[1]
-                if state == "device":
-                    _, model = self._run_adb(["-s", serial, "shell", "getprop", "ro.product.model"])
-                    return "device", f"{model} ({serial})" if model else serial
-                return state, serial
-        return "none", None
+            parts = [part for part in line.strip().split("\t") if part]
+            if len(parts) >= 2:
+                devices.append((parts[0], parts[1]))
+
+        if not devices:
+            return "none", None
+
+        chosen = next((item for item in devices if item[1] == "device"), None)
+        if chosen is None:
+            chosen = next((item for item in devices if item[1] == "unauthorized"), None)
+        if chosen is None:
+            chosen = devices[0]
+
+        serial, state = chosen
+        if state == "device":
+            _, model = self._run_adb(["-s", serial, "shell", "getprop", "ro.product.model"])
+            return "device", f"{model} ({serial})" if model else serial
+        return state, serial
 
     def _setup_adb_forward(self, serial_info: str) -> bool:
         serial = serial_info.split("(")[-1].rstrip(")") if "(" in serial_info else serial_info
@@ -205,25 +217,10 @@ class AudioStreamWorker(threading.Thread):
         return True
 
     def _process_audio(self, raw_data: bytes) -> tuple[bytes, float, bool]:
-        samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
-        if samples.size == 0:
-            return raw_data, 0.0, False
-
-        g = self.gain_linear
-        if abs(g - 1.0) > 1e-4 or self.soft_limiter:
-            norm = (samples / 32768.0) * g
-            if self.soft_limiter:
-                norm = np.where(np.abs(norm) > 0.75, np.tanh(norm), norm)
-            clipping = bool(np.max(np.abs(norm)) >= CLIP_THRESHOLD)
-            clamped = np.clip(norm * 32767.0, -32768.0, 32767.0).astype(np.int16)
-            out_bytes = clamped.tobytes()
-            peak = float(np.max(np.abs(clamped))) / 32768.0
-        else:
-            out_bytes = raw_data
-            peak = float(np.max(np.abs(samples))) / 32768.0
-            clipping = peak >= CLIP_THRESHOLD
-
-        return out_bytes, min(100.0, peak * 100.0), clipping
+        out_bytes, level, clipping = process_pcm_s16le(
+            raw_data, self.gain_linear, self.soft_limiter, True
+        )
+        return out_bytes, level * 100.0, clipping
 
     def run(self):
         last_state = ""
@@ -278,7 +275,7 @@ class AudioStreamWorker(threading.Thread):
                     raise ConnectionError("La app Android no respondio R")
 
                 sock.settimeout(None)
-                sock.sendall(struct.pack(">IBB", rate, ch, 16))
+                sock.sendall(pack_header(rate, ch, chunk_ms))
 
                 self._stream = self._pa.open(
                     format=pyaudio.paInt16,
@@ -327,6 +324,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"SpeakerPhone-USB v{APP_VERSION} (macOS)")
         self.setMinimumSize(540, 520)
         self._update_url = RELEASES_URL
+        self._settings_ready = False
         self.signals = WorkerSignals()
         self.worker = AudioStreamWorker(self.signals)
         self._init_ui()
@@ -335,6 +333,12 @@ class MainWindow(QMainWindow):
         self._populate_audio_devices()
         self._refresh_adb_status()
         self._check_updates()
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(6 * 60 * 60 * 1000)
+        self.update_timer.timeout.connect(self._check_updates)
+        self.update_timer.start()
+        self._apply_saved_settings()
+        self._settings_ready = True
         self.worker.start()
 
     def _create_app_icon(self, color_hex="#2ECC71") -> QIcon:
@@ -468,9 +472,9 @@ class MainWindow(QMainWindow):
         row_latency = QHBoxLayout()
         row_latency.addWidget(QLabel("Perfil de búfer:"))
         self.combo_profile = QComboBox()
-        self.combo_profile.addItem("Baja latencia (8 ms)", 8)
-        self.combo_profile.addItem("Equilibrado (15 ms)", 15)
-        self.combo_profile.addItem("Alta estabilidad (30 ms)", 30)
+        self.combo_profile.addItem("Baja latencia (8 ms)", ("low", 8))
+        self.combo_profile.addItem("Equilibrado (15 ms)", ("balanced", 15))
+        self.combo_profile.addItem("Alta estabilidad (30 ms)", ("stable", 30))
         self.combo_profile.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
@@ -526,7 +530,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh_dev.clicked.connect(self._populate_audio_devices)
         self.combo_devices.currentIndexChanged.connect(self._on_device_changed)
         self.slider_gain.valueChanged.connect(self._on_gain_changed)
-        self.chk_limiter.toggled.connect(self.worker.set_soft_limiter)
+        self.chk_limiter.toggled.connect(self._on_limiter_toggled)
         self.combo_profile.currentIndexChanged.connect(self._on_profile_changed)
 
     def _populate_audio_devices(self):
@@ -534,14 +538,14 @@ class MainWindow(QMainWindow):
         self.combo_devices.clear()
         pa = self.worker._pa
         try:
-            wasapi_idx = pa.get_host_api_info_by_type(pyaudio.paWASAPI)["index"]
+            coreaudio_idx = pa.get_host_api_info_by_type(pyaudio.paCoreAudio)["index"]
         except OSError:
-            wasapi_idx = None
+            coreaudio_idx = None
         default_idx = 0
         count = 0
         for i in range(pa.get_device_count()):
             dev = pa.get_device_info_by_index(i)
-            if wasapi_idx is not None and dev["hostApi"] != wasapi_idx:
+            if coreaudio_idx is not None and dev["hostApi"] != coreaudio_idx:
                 continue
             if dev["maxInputChannels"] > 0:
                 is_lb = dev.get("isLoopbackDevice", False)
@@ -553,23 +557,72 @@ class MainWindow(QMainWindow):
                 count += 1
         self.combo_devices.blockSignals(False)
         if self.combo_devices.count() > 0:
-            self.combo_devices.setCurrentIndex(default_idx)
-            self._on_device_changed(default_idx)
+            saved_name = load_settings().get("device_name")
+            saved_index = self.combo_devices.findText(saved_name) if saved_name else -1
+            index = saved_index if saved_index >= 0 else default_idx
+            self.combo_devices.setCurrentIndex(index)
+            self._on_device_changed(index)
+
+    def _apply_saved_settings(self):
+        settings = load_settings()
+
+        gain_db = settings.get("gain_db")
+        if isinstance(gain_db, (int, float)):
+            value = int(round(max(-12.0, min(12.0, float(gain_db))) * 10))
+            self.slider_gain.setValue(value)
+
+        limiter = settings.get("soft_limiter")
+        if isinstance(limiter, bool):
+            self.chk_limiter.setChecked(limiter)
+
+        profile = settings.get("profile")
+        if profile:
+            for index in range(self.combo_profile.count()):
+                data = self.combo_profile.itemData(index)
+                if data and data[0] == profile:
+                    self.combo_profile.setCurrentIndex(index)
+                    break
+
+        device_name = settings.get("device_name")
+        if device_name:
+            index = self.combo_devices.findText(device_name)
+            if index >= 0:
+                self.combo_devices.setCurrentIndex(index)
+
+    def _save_settings(self):
+        if not self._settings_ready:
+            return
+        profile_data = self.combo_profile.currentData()
+        save_settings(
+            {
+                "gain_db": self.slider_gain.value() / 10.0,
+                "soft_limiter": self.chk_limiter.isChecked(),
+                "profile": profile_data[0] if profile_data else "",
+                "device_name": self.combo_devices.currentText(),
+            }
+        )
 
     def _on_device_changed(self, combo_idx: int):
         dev_idx = self.combo_devices.itemData(combo_idx)
         if dev_idx is not None:
             self.worker.set_device(dev_idx)
+            self._save_settings()
 
     def _on_gain_changed(self, val: int):
         db = val / 10.0
         self.label_gain.setText(f"{db:+.1f} dB")
         self.worker.set_gain_db(db)
+        self._save_settings()
+
+    def _on_limiter_toggled(self, enabled: bool):
+        self.worker.set_soft_limiter(enabled)
+        self._save_settings()
 
     def _on_profile_changed(self, idx: int):
-        ms = self.combo_profile.itemData(idx)
-        if ms:
-            self.worker.set_chunk_ms(int(ms))
+        data = self.combo_profile.itemData(idx)
+        if data:
+            self.worker.set_chunk_ms(int(data[1]))
+            self._save_settings()
 
     def _on_retry(self):
         self.btn_toggle.setText("Detener")
@@ -676,10 +729,12 @@ class MainWindow(QMainWindow):
             self.activateWindow()
 
     def closeEvent(self, event):
+        self._save_settings()
         event.ignore()
         self.hide()
 
     def _quit_app(self):
+        self._save_settings()
         self.worker.stop()
         self.tray_icon.hide()
         QApplication.quit()

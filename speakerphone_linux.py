@@ -12,14 +12,12 @@ Novedades v4:
 - Interfaz (UI):
   * Layout fluido y adaptable que se ajusta naturalmente al tamaño de la ventana sin escalar tipografías artificialmente
 """
-from array import array
 from collections import deque
 import math
 import os
 import re
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -36,7 +34,10 @@ from app_logger import (
     setup_logging,
 )
 from app_icon import get_icon_path
+from app_settings import load_settings, save_settings
 from app_version import APP_VERSION
+from dsp import process_pcm_s16le
+from protocol import pack_header
 from update_checker import RELEASES_URL, check_for_update
 
 PKG = "com.usbaudio"
@@ -45,7 +46,6 @@ DEFAULT_RATE = 48000
 DEFAULT_CHANNELS = 2
 DEFAULT_CAPTURE_MS = 15
 DEFAULT_CHUNK_MS = 15
-CLIP_THRESHOLD = 0.98
 MAX_LOG_LINES = 300
 
 
@@ -171,107 +171,52 @@ def list_audio_sources():
 
 
 def query_adb_device():
-    """Consulta `adb devices -l` y devuelve (estado, descripcion_dispositivo)."""
+    """Consulta `adb devices -l` y devuelve (estado, descripción) del mejor dispositivo."""
     try:
         out = run_cmd(["adb", "devices", "-l"], timeout=3)
     except Exception as e:
         return "error", f"Error ejecutando adb: {e}"
 
-    lines = [l.strip() for l in out.splitlines()[1:] if l.strip()]
-    if not lines:
+    entries = []
+    for raw_line in out.splitlines()[1:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        serial = parts[0]
+        state = parts[1] if len(parts) > 1 else "unknown"
+
+        model_match = re.search(r"model:([^\s]+)", line)
+        device_match = re.search(r"device:([^\s]+)", line)
+        label = None
+        if model_match:
+            label = model_match.group(1).replace("_", " ")
+        elif device_match:
+            label = device_match.group(1)
+
+        display = f"{label} ({serial})" if label else serial
+        entries.append((state, display))
+
+    if not entries:
         return "none", "Ningún dispositivo conectado"
 
-    line = lines[0]
-    parts = line.split()
-    serial = parts[0]
-    state = parts[1] if len(parts) > 1 else "unknown"
+    # Preferir un dispositivo listo; si no, uno pendiente de autorización.
+    chosen = next((entry for entry in entries if entry[0] == "device"), None)
+    if chosen is None:
+        chosen = next((entry for entry in entries if entry[0] == "unauthorized"), None)
+    if chosen is None:
+        chosen = entries[0]
 
-    model_match = re.search(r"model:([^\s]+)", line)
-    device_match = re.search(r"device:([^\s]+)", line)
-    label = None
-    if model_match:
-        label = model_match.group(1).replace("_", " ")
-    elif device_match:
-        label = device_match.group(1)
-
-    display = f"{label} ({serial})" if label else serial
-
+    state, display = chosen
     if state == "device":
         return "ready", display
-    elif state == "unauthorized":
+    if state == "unauthorized":
         return "unauthorized", f"{display} — Pendiente de autorización USB"
-    elif state == "offline":
+    if state == "offline":
         return "offline", f"{display} — Fuera de línea (offline)"
-    else:
-        return state, f"{display} ({state})"
-
-
-def process_pcm_s16le(data, gain_linear, soft_limiter, compute_meter):
-    """
-    Aplica ganancia y limitador suave (tanh) al bloque PCM s16le si es necesario,
-    y calcula (bytes_procesados, nivel_0_1, hay_saturacion).
-    """
-    usable = len(data) - (len(data) & 1)
-    if usable <= 0:
-        return data, 0.0, False
-
-    need_dsp = (abs(gain_linear - 1.0) > 0.005) or soft_limiter
-
-    if not need_dsp and not compute_meter:
-        return data, 0.0, False
-
-    samples = array("h")
-    samples.frombytes(data[:usable])
-    if sys.byteorder != "little":
-        samples.byteswap()
-
-    clipping = False
-    if need_dsp:
-        tanh = math.tanh
-        g = gain_linear
-        if soft_limiter:
-            # Limitador suave tipo knee con compresión tanh por encima de 0.75
-            for i, s in enumerate(samples):
-                x = (s / 32768.0) * g
-                ax = -x if x < 0.0 else x
-                if ax > 0.75:
-                    excess = (ax - 0.75) / 0.25
-                    y = 0.75 + 0.245 * tanh(excess)
-                    x = -y if x < 0.0 else y
-                if x >= 0.99:
-                    clipping = True
-                samples[i] = int(max(-32767, min(32767, x * 32767.0)))
-        else:
-            for i, s in enumerate(samples):
-                v = int(s * g)
-                if v > 32767:
-                    v = 32767
-                    clipping = True
-                elif v < -32768:
-                    v = -32768
-                    clipping = True
-                samples[i] = v
-
-        if sys.byteorder != "little":
-            samples.byteswap()
-        out_bytes = samples.tobytes()
-    else:
-        out_bytes = data[:usable]
-
-    if not compute_meter:
-        return out_bytes, 0.0, clipping
-
-    sub = samples[::4] if len(samples) > 128 else samples
-    if not sub:
-        return out_bytes, 0.0, clipping
-
-    peak = max(max(sub), -min(sub))
-    sum_sq = sum(s * s for s in sub)
-    rms = math.sqrt(sum_sq / len(sub)) / 32768.0
-    level = min(1.0, math.pow(rms * 2.5, 0.65))
-    if (peak / 32768.0) >= CLIP_THRESHOLD and not soft_limiter:
-        clipping = True
-    return out_bytes, level, clipping
+    return state, f"{display} ({state})"
 
 
 class SleepLockWatcher:
@@ -395,6 +340,58 @@ class StreamController:
             on_log=self.on_log,
         )
 
+    def _cleanup_orphan_virtual_sink(self):
+        """Libera sinks virtuales 'usb_phone' que quedaron tras un cierre brusco."""
+        try:
+            procs = subprocess.run(
+                ["pgrep", "-af", "parec"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env=clean_env(),
+            ).stdout
+            if "usb_phone" in procs:
+                return  # Otra instancia está transmitiendo: no tocar su sink.
+        except Exception:
+            pass
+
+        try:
+            out = run_cmd(["pactl", "list", "short", "modules"], timeout=3)
+        except Exception:
+            return
+
+        released = False
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            module_id = parts[0].strip()
+            if "module-null-sink" in parts[1] and "usb_phone" in line:
+                try:
+                    subprocess.run(
+                        ["pactl", "unload-module", module_id],
+                        capture_output=True,
+                        timeout=2,
+                        env=clean_env(),
+                    )
+                    released = True
+                except Exception:
+                    pass
+        if released:
+            self.on_log("Sink virtual huérfano 'usb_phone' liberado.")
+
+        try:
+            if run_cmd(["pactl", "get-default-sink"], timeout=2) == "usb_phone":
+                sinks = run_cmd(["pactl", "list", "short", "sinks"], timeout=2)
+                for line in sinks.splitlines():
+                    parts = line.split("\t")
+                    if len(parts) >= 2 and parts[1].strip() != "usb_phone":
+                        run_cmd(["pactl", "set-default-sink", parts[1].strip()], timeout=2)
+                        self.on_log(f"Sink por defecto restaurado a '{parts[1].strip()}'.")
+                        break
+        except Exception:
+            pass
+
     def start(self):
         if self._running:
             return
@@ -403,6 +400,7 @@ class StreamController:
         self._stop_event.clear()
         self._retry_event.clear()
 
+        self._cleanup_orphan_virtual_sink()
         self.sleep_watcher.start()
 
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -660,7 +658,7 @@ class StreamController:
             raise ConnectionError("La app Android no está escuchando (¿está abierta en el móvil?)")
 
         sock.settimeout(None)
-        sock.sendall(struct.pack(">IBB", self.rate, self.channels, 16))
+        sock.sendall(pack_header(self.rate, self.channels, self.chunk_ms))
 
         chunk = self.channels * 2 * self.rate * self.chunk_ms // 1000
         cap = subprocess.Popen(
@@ -721,7 +719,7 @@ class StreamController:
 
 def run_qt_app(qt_binding):
     if qt_binding == "PySide6":
-        from PySide6.QtCore import Qt, Signal, QObject, QUrl
+        from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer
         from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PySide6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -730,7 +728,7 @@ def run_qt_app(qt_binding):
             QMenu, QScrollArea
         )
     else:
-        from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl
+        from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl, QTimer
         from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PyQt6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -812,6 +810,7 @@ def run_qt_app(qt_binding):
             self._status_color = "#eab308"
             self._is_clipping = False
             self._update_url = RELEASES_URL
+            self._settings_ready = False
 
             self.setWindowTitle(f"USB Audio Stream v{APP_VERSION}")
             self.setWindowIcon(make_tray_icon("#3b82f6"))
@@ -837,6 +836,8 @@ def run_qt_app(qt_binding):
             self._setup_tray()
             self._apply_style()
             self._refresh_sources()
+            self._apply_saved_settings()
+            self._settings_ready = True
 
             missing = check_dependencies()
             if missing:
@@ -850,6 +851,11 @@ def run_qt_app(qt_binding):
 
             self._refresh_adb_status()
             self._check_updates()
+
+            self.update_timer = QTimer(self)
+            self.update_timer.setInterval(6 * 60 * 60 * 1000)
+            self.update_timer.timeout.connect(self._check_updates)
+            self.update_timer.start()
 
         def _build_ui(self):
             outer = QVBoxLayout(self)
@@ -1041,7 +1047,7 @@ def run_qt_app(qt_binding):
             self.limiter_cb = QCheckBox("Limitador suave")
             self.limiter_cb.setChecked(True)
             self.limiter_cb.setToolTip("Suaviza picos altos antes de enviarlos para evitar distorsión")
-            self.limiter_cb.toggled.connect(self.controller.set_soft_limiter)
+            self.limiter_cb.toggled.connect(self._on_limiter_toggled)
 
             gain_row.addWidget(gain_lbl)
             gain_row.addWidget(self.gain_slider, 1)
@@ -1056,9 +1062,9 @@ def run_qt_app(qt_binding):
 
             prof_lbl = QLabel("Perfil:")
             self.profile_combo = QComboBox()
-            self.profile_combo.addItem("Baja latencia (8 ms)", (8, 8))
-            self.profile_combo.addItem("Equilibrado (15 ms)", (15, 15))
-            self.profile_combo.addItem("Alta estabilidad (30 ms)", (30, 30))
+            self.profile_combo.addItem("Baja latencia (8 ms)", ("low", 8, 8))
+            self.profile_combo.addItem("Equilibrado (15 ms)", ("balanced", 15, 15))
+            self.profile_combo.addItem("Alta estabilidad (30 ms)", ("stable", 30, 30))
             self.profile_combo.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
             self.profile_combo.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
             self.profile_combo.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
@@ -1184,6 +1190,7 @@ def run_qt_app(qt_binding):
 
         def _quit_app(self):
             self._force_quit = True
+            self._save_settings()
             self.controller.stop()
             if self.tray:
                 self.tray.hide()
@@ -1276,31 +1283,97 @@ def run_qt_app(qt_binding):
                     self.source_combo.setCurrentIndex(idx)
             self.source_combo.blockSignals(False)
 
+        def _apply_saved_settings(self):
+            settings = load_settings()
+
+            gain_db = settings.get("gain_db")
+            if isinstance(gain_db, (int, float)):
+                value = int(round(max(-12.0, min(6.0, float(gain_db))) * 10))
+                self.gain_slider.setValue(value)
+
+            limiter = settings.get("soft_limiter")
+            if isinstance(limiter, bool):
+                self.limiter_cb.setChecked(limiter)
+
+            profile = settings.get("profile")
+            if profile:
+                for index in range(self.profile_combo.count()):
+                    data = self.profile_combo.itemData(index)
+                    if data and data[0] == profile:
+                        self.profile_combo.setCurrentIndex(index)
+                        break
+
+            capture = settings.get("capture_ms")
+            chunk = settings.get("chunk_ms")
+            if isinstance(capture, int) and isinstance(chunk, int):
+                self.cap_spin.setValue(max(2, min(100, capture)))
+                self.chk_spin.setValue(max(2, min(100, chunk)))
+                self.controller.set_latency(
+                    self.cap_spin.value(), self.chk_spin.value()
+                )
+
+            rate = settings.get("rate_mode")
+            if rate:
+                index = self.rate_combo.findData(rate)
+                if index >= 0:
+                    self.rate_combo.setCurrentIndex(index)
+
+            source = settings.get("source_mode")
+            if source:
+                index = self.source_combo.findData(source)
+                if index >= 0:
+                    self.source_combo.setCurrentIndex(index)
+
+        def _save_settings(self):
+            if not self._settings_ready:
+                return
+            profile_data = self.profile_combo.currentData()
+            save_settings(
+                {
+                    "profile": profile_data[0] if profile_data else "",
+                    "capture_ms": self.cap_spin.value(),
+                    "chunk_ms": self.chk_spin.value(),
+                    "source_mode": self.source_combo.currentData() or "__default__",
+                    "rate_mode": self.rate_combo.currentData() or "native",
+                    "gain_db": self.controller.gain_db,
+                    "soft_limiter": self.limiter_cb.isChecked(),
+                }
+            )
+
         def _on_source_changed(self, idx):
             mode = self.source_combo.itemData(idx)
             if mode:
                 self.controller.set_source_mode(mode)
+                self._save_settings()
 
         def _on_rate_changed(self, idx):
             mode = self.rate_combo.itemData(idx)
             if mode:
                 self.controller.set_rate_mode(mode)
+                self._save_settings()
 
         def _on_gain_changed(self, val):
             db = val / 10.0
             self.gain_val_lbl.setText(f"{db:+.1f} dB")
             self.controller.set_gain_db(db)
+            self._save_settings()
+
+        def _on_limiter_toggled(self, enabled):
+            self.controller.set_soft_limiter(enabled)
+            self._save_settings()
 
         def _on_profile_changed(self, idx):
             vals = self.profile_combo.itemData(idx)
             if vals:
-                cap_ms, chk_ms = vals
+                _key, cap_ms, chk_ms = vals
                 self.cap_spin.setValue(cap_ms)
                 self.chk_spin.setValue(chk_ms)
                 self.controller.set_latency(cap_ms, chk_ms)
+                self._save_settings()
 
         def _on_apply_latency(self):
             self.controller.set_latency(self.cap_spin.value(), self.chk_spin.value())
+            self._save_settings()
 
         def _refresh_tray_icon(self):
             if not self.tray:
@@ -1369,6 +1442,7 @@ def run_qt_app(qt_binding):
                 self.toggle_btn.setText("Detener")
 
         def closeEvent(self, event):
+            self._save_settings()
             if not self._force_quit and self.tray and self.tray.isVisible():
                 event.ignore()
                 self.hide()
@@ -1816,17 +1890,96 @@ def run_tk_app():
         root.after(0, _draw)
 
     ctrl = StreamController(update_status, update_device, append_log, update_level)
+    settings_ready = {"value": False}
+
+    def save_settings_tk():
+        if not settings_ready["value"]:
+            return
+        try:
+            capture = int(cap_spin.get())
+            chunk = int(chk_spin.get())
+            gain = float(gain_var.get())
+        except (ValueError, tk.TclError):
+            return
+        save_settings(
+            {
+                "profile": profile_combo.get(),
+                "capture_ms": capture,
+                "chunk_ms": chunk,
+                "source_mode": sources_map.get(src_combo.get(), "__default__"),
+                "rate_mode": "native" if rate_combo.get() == "Nativa" else rate_combo.get(),
+                "gain_db": gain,
+                "soft_limiter": bool(lim_var.get()),
+            }
+        )
+
+    def apply_settings_tk():
+        settings = load_settings()
+
+        gain = settings.get("gain_db")
+        if isinstance(gain, (int, float)):
+            gain = max(-12.0, min(6.0, float(gain)))
+            gain_var.set(gain)
+            ctrl.set_gain_db(gain)
+
+        limiter = settings.get("soft_limiter")
+        if isinstance(limiter, bool):
+            lim_var.set(limiter)
+            ctrl.set_soft_limiter(limiter)
+
+        profile = settings.get("profile")
+        if profile in profile_map:
+            profile_combo.set(profile)
+            cap_ms, chk_ms = profile_map[profile]
+            cap_spin.delete(0, "end")
+            cap_spin.insert(0, str(cap_ms))
+            chk_spin.delete(0, "end")
+            chk_spin.insert(0, str(chk_ms))
+            ctrl.set_latency(cap_ms, chk_ms)
+
+        rate_mode = settings.get("rate_mode")
+        rate_label = "Nativa" if rate_mode == "native" else rate_mode
+        if rate_label in rate_combo["values"]:
+            rate_combo.set(rate_label)
+            ctrl.set_rate_mode(rate_mode)
+
+        source_mode = settings.get("source_mode")
+        if source_mode:
+            for label, source_id in sources_map.items():
+                if source_id == source_mode:
+                    src_combo.set(label)
+                    ctrl.set_source_mode(source_mode)
+                    break
+
+        capture = settings.get("capture_ms")
+        chunk = settings.get("chunk_ms")
+        if isinstance(capture, int) and isinstance(chunk, int):
+            cap_spin.delete(0, "end")
+            cap_spin.insert(0, str(max(2, min(100, capture))))
+            chk_spin.delete(0, "end")
+            chk_spin.insert(0, str(max(2, min(100, chunk))))
+            ctrl.set_latency(cap_spin.get(), chk_spin.get())
+
+        settings_ready["value"] = True
+
+    def on_gain_changed(value):
+        ctrl.set_gain_db(float(value))
+        save_settings_tk()
 
     tk.Scale(
         gain_row, from_=-12, to=6, resolution=0.5, orient="horizontal",
         variable=gain_var, showvalue=True, bg="#1f232b", fg="#f3f4f6",
-        highlightthickness=0, command=lambda v: ctrl.set_gain_db(float(v))
+        highlightthickness=0, command=on_gain_changed
     ).pack(side="left", fill="x", expand=True, padx=8)
+
+    def on_limiter_changed():
+        ctrl.set_soft_limiter(lim_var.get())
+        save_settings_tk()
 
     tk.Checkbutton(
         gain_row, text="Limitador", variable=lim_var,
         bg="#1f232b", fg="#cfd5e2", selectcolor="#16181d",
-        command=lambda: ctrl.set_soft_limiter(lim_var.get())
+        command=on_limiter_changed
     ).pack(side="right")
 
     opts = list_audio_sources()
@@ -1836,8 +1989,17 @@ def run_tk_app():
     if opts:
         src_combo.current(0)
 
-    src_combo.bind("<<ComboboxSelected>>", lambda _e: ctrl.set_source_mode(sources_map.get(src_combo.get(), "__default__")))
-    rate_combo.bind("<<ComboboxSelected>>", lambda _e: ctrl.set_rate_mode("native" if rate_combo.get() == "Nativa" else rate_combo.get()))
+    def on_source_selected(_event):
+        ctrl.set_source_mode(sources_map.get(src_combo.get(), "__default__"))
+        save_settings_tk()
+
+    def on_rate_selected(_event):
+        mode = "native" if rate_combo.get() == "Nativa" else rate_combo.get()
+        ctrl.set_rate_mode(mode)
+        save_settings_tk()
+
+    src_combo.bind("<<ComboboxSelected>>", on_source_selected)
+    rate_combo.bind("<<ComboboxSelected>>", on_rate_selected)
 
     def on_profile_selected(_event):
         vals = profile_map.get(profile_combo.get())
@@ -1847,10 +2009,18 @@ def run_tk_app():
             chk_spin.delete(0, "end")
             chk_spin.insert(0, str(vals[1]))
             ctrl.set_latency(*vals)
+            save_settings_tk()
 
     profile_combo.bind("<<ComboboxSelected>>", on_profile_selected)
-    tk.Button(lat_frame, text="Aplicar", bg="#282d37", fg="#e6e8ee", relief="flat",
-              command=lambda: ctrl.set_latency(cap_spin.get(), chk_spin.get())).pack(side="right")
+
+    def on_apply_latency():
+        ctrl.set_latency(cap_spin.get(), chk_spin.get())
+        save_settings_tk()
+
+    tk.Button(
+        lat_frame, text="Aplicar", bg="#282d37", fg="#e6e8ee", relief="flat",
+        command=on_apply_latency,
+    ).pack(side="right")
 
     btn_row = tk.Frame(root, bg="#16181d")
     btn_row.grid(row=3, column=0, sticky="ew", padx=18, pady=4)
@@ -1884,6 +2054,8 @@ def run_tk_app():
 
     root.bind("<Configure>", on_configure)
 
+    apply_settings_tk()
+
     missing = check_dependencies()
     if missing:
         update_status("error", f"Faltan herramientas: {', '.join(missing)}")
@@ -1894,7 +2066,14 @@ def run_tk_app():
     check_adb_async()
     check_updates_async()
 
+    def periodic_update_check():
+        check_updates_async()
+        root.after(6 * 60 * 60 * 1000, periodic_update_check)
+
+    root.after(6 * 60 * 60 * 1000, periodic_update_check)
+
     def on_close():
+        save_settings_tk()
         ctrl.stop()
         root.destroy()
 

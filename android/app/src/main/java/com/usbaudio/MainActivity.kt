@@ -13,6 +13,7 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -25,11 +26,20 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 
+import org.json.JSONObject
+
+import java.net.HttpURLConnection
+import java.net.URL
+
 class MainActivity : Activity() {
     companion object {
-        const val APP_VERSION = "v0.18"
+        const val APP_VERSION = "v0.19"
         private const val PREFS_NAME = "usbaudio_prefs"
         private const val KEY_BUFFER_MS = "buffer_ms"
+        private const val RELEASES_API =
+            "https://api.github.com/repos/Poiat/SpeakerPhone-USB/releases/latest"
+        private const val RELEASES_URL =
+            "https://github.com/Poiat/SpeakerPhone-USB/releases/latest"
 
         private data class BufferProfile(val ms: Int, val title: String, val description: String)
 
@@ -50,6 +60,9 @@ class MainActivity : Activity() {
     private lateinit var formatValue: TextView
     private lateinit var underrunsValue: TextView
     private lateinit var bufferInfo: TextView
+    private lateinit var updateInfo: TextView
+    private lateinit var updateAction: Button
+    private var updateUrl: String = RELEASES_URL
     private lateinit var actionButton: Button
     private val bufferButtons = mutableMapOf<Int, Button>()
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -261,6 +274,30 @@ class MainActivity : Activity() {
         }
         root.addView(actionButton)
 
+        val updateRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
+        }
+        updateInfo = TextView(this).apply {
+            text = "Comprobar si hay una versión nueva"
+            textSize = 11f
+            setTextColor(Color.parseColor("#94A3B8"))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        updateAction = Button(this).apply {
+            text = "Buscar actualizaciones"
+            textSize = 11f
+            isAllCaps = false
+            setOnClickListener { checkForUpdates() }
+        }
+        updateRow.addView(updateInfo)
+        updateRow.addView(updateAction)
+        root.addView(updateRow)
+
         root.addView(TextView(this).apply {
             text = "127.0.0.1:${AudioStreamService.PORT} · WakeLock activo · $APP_VERSION"
             textSize = 11f
@@ -302,6 +339,71 @@ class MainActivity : Activity() {
             AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Altavoz (${Build.MODEL})"
             else -> "Salida (${Build.MODEL})"
         }
+    }
+
+    private fun checkForUpdates() {
+        updateAction.isEnabled = false
+        updateAction.text = "Buscando…"
+        updateInfo.text = "Consultando GitHub…"
+
+        Thread {
+            try {
+                val connection = URL(RELEASES_API).openConnection() as HttpURLConnection
+                connection.connectTimeout = 6000
+                connection.readTimeout = 6000
+                connection.setRequestProperty(
+                    "User-Agent",
+                    "SpeakerPhone-USB/${APP_VERSION.removePrefix("v")}"
+                )
+                connection.setRequestProperty("Accept", "application/vnd.github+json")
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val json = JSONObject(body)
+                val latest = json.optString("tag_name").removePrefix("v")
+                val url = json.optString("html_url").ifBlank { RELEASES_URL }
+
+                runOnUiThread {
+                    if (latest.isNotBlank() &&
+                        compareVersions(latest, APP_VERSION.removePrefix("v")) > 0
+                    ) {
+                        updateUrl = url
+                        updateInfo.text = "Actualización disponible: v$latest"
+                        updateAction.text = "Descargar"
+                        updateAction.isEnabled = true
+                        updateAction.setOnClickListener {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
+                        }
+                    } else {
+                        updateInfo.text = "Estás al día ($APP_VERSION)"
+                        updateAction.text = "Buscar actualizaciones"
+                        updateAction.isEnabled = true
+                        updateAction.setOnClickListener { checkForUpdates() }
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    updateInfo.text = "No se pudo comprobar: ${e.message ?: "sin conexión"}"
+                    updateAction.text = "Buscar actualizaciones"
+                    updateAction.isEnabled = true
+                    updateAction.setOnClickListener { checkForUpdates() }
+                }
+            }
+        }.start()
+    }
+
+    private fun compareVersions(a: String, b: String): Int {
+        fun parts(value: String): List<Int> {
+            val result = value.split('.').map { it.toIntOrNull() ?: 0 }.toMutableList()
+            while (result.size < 3) result.add(0)
+            return result.take(3)
+        }
+
+        val left = parts(a)
+        val right = parts(b)
+        for (index in 0 until 3) {
+            val diff = left[index].compareTo(right[index])
+            if (diff != 0) return diff
+        }
+        return 0
     }
 
     private fun selectBuffer(ms: Int) {

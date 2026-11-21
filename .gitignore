@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build tools
+build/
+dist/
+*.spec
+
+# Release artifacts / extracted AppImages
+*.AppImage
+*.zip
+*.exe
+*.apk
+squashfs-root/
+
+# Android / Gradle / IDE
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/build/
+android/.idea/
+android/local.properties
+
+# Local logs / settings
+*.log
