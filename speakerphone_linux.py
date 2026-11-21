@@ -25,6 +25,16 @@ import sys
 import threading
 import time
 
+from app_logger import (
+    get_log_path,
+    install_exception_hooks,
+    log,
+    log_exception,
+    log_startup_info,
+    open_log_folder,
+    setup_logging,
+)
+
 PKG = "com.usbaudio"
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
@@ -1022,11 +1032,17 @@ def run_qt_app(qt_binding):
             log_hdr = QHBoxLayout()
             log_lbl = QLabel("LOG EN VIVO")
             log_lbl.setObjectName("sectionLabel")
+            open_logs_btn = QPushButton("Abrir carpeta")
+            open_logs_btn.setObjectName("miniBtn")
+            open_logs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            open_logs_btn.setToolTip(get_log_path() or "Carpeta de logs no disponible")
+            open_logs_btn.clicked.connect(self._open_logs)
             clear_log_btn = QPushButton("Limpiar")
             clear_log_btn.setObjectName("miniBtn")
             clear_log_btn.clicked.connect(lambda: self.log_box.clear())
             log_hdr.addWidget(log_lbl)
             log_hdr.addStretch(1)
+            log_hdr.addWidget(open_logs_btn)
             log_hdr.addWidget(clear_log_btn)
             root.addLayout(log_hdr)
 
@@ -1205,6 +1221,11 @@ def run_qt_app(qt_binding):
         def _append_log(self, msg):
             ts = time.strftime("%H:%M:%S")
             self.log_box.appendPlainText(f"[{ts}] {msg}")
+            log(msg)
+
+        def _open_logs(self):
+            if not open_log_folder():
+                self._append_log("No se pudo abrir la carpeta de logs.")
 
         def _on_retry(self):
             self.toggle_btn.setText("Detener")
@@ -1505,17 +1526,35 @@ def run_tk_app():
     log_hdr.grid(row=4, column=0, sticky="ew", padx=18, pady=(4, 2))
     tk.Label(log_hdr, text="LOG EN VIVO", bg="#16181d", fg="#8b93a5", font=("Sans", 8, "bold")).pack(side="left")
 
+    def open_logs_tk():
+        if not open_log_folder():
+            append_log("No se pudo abrir la carpeta de logs.")
+
+    tk.Button(
+        log_hdr, text="Abrir carpeta", command=open_logs_tk, bg="#282d37",
+        fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
+    ).pack(side="right")
+
     log_box = scrolledtext.ScrolledText(root, height=6, bg="#111317", fg="#9ca3af", font=("Monospace", 8), borderwidth=1, relief="flat")
     log_box.grid(row=5, column=0, sticky="nsew", padx=18, pady=(0, 14))
 
     def append_log(msg):
         ts = time.strftime("%H:%M:%S")
         log_lines.append(f"[{ts}] {msg}")
+        log(msg)
         def _sync():
             log_box.delete("1.0", "end")
             log_box.insert("end", "\n".join(log_lines) + "\n")
             log_box.see("end")
         root.after(0, _sync)
+
+    original_report_exception = root.report_callback_exception
+
+    def report_callback_exception(exc_type, exc_value, exc_tb):
+        log_exception(exc_type, exc_value, exc_tb, "Excepción no controlada en la UI (Tk)")
+        original_report_exception(exc_type, exc_value, exc_tb)
+
+    root.report_callback_exception = report_callback_exception
 
     def update_device(state, text):
         root.after(0, lambda: dev_var.set(text))
@@ -1647,6 +1686,9 @@ def run_tk_app():
 
 
 def main():
+    setup_logging()
+    install_exception_hooks()
+    log_startup_info()
     for binding in ("PySide6", "PyQt6"):
         try:
             __import__(binding)

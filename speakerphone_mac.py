@@ -19,6 +19,15 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont
 
+from app_logger import (
+    get_log_path,
+    install_exception_hooks,
+    log,
+    log_startup_info,
+    open_log_folder,
+    setup_logging,
+)
+
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
 DEFAULT_CHANNELS = 2
@@ -429,6 +438,13 @@ class MainWindow(QMainWindow):
 
         log_group = QGroupBox("Registros en Vivo")
         log_layout = QVBoxLayout(log_group)
+        log_header = QHBoxLayout()
+        btn_open_logs = QPushButton("Abrir carpeta de logs")
+        btn_open_logs.setToolTip(get_log_path() or "Carpeta de logs no disponible")
+        btn_open_logs.clicked.connect(self._open_log_folder)
+        log_header.addStretch(1)
+        log_header.addWidget(btn_open_logs)
+        log_layout.addLayout(log_header)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Menlo", 10))
@@ -453,7 +469,7 @@ class MainWindow(QMainWindow):
         self.tray_icon.show()
 
     def _connect_signals(self):
-        self.signals.log.connect(lambda m: self.log_view.append(f"[{time.strftime('%H:%M:%S')}] {m}"))
+        self.signals.log.connect(self._append_log)
         self.signals.status_changed.connect(self._update_status)
         self.signals.level_updated.connect(self._update_meter)
         self.signals.adb_checked.connect(self._on_adb_checked)
@@ -519,6 +535,14 @@ class MainWindow(QMainWindow):
             self.btn_toggle.setText("Iniciar")
             self.worker.set_paused(True)
 
+    def _append_log(self, msg: str):
+        self.log_view.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        log(msg)
+
+    def _open_log_folder(self):
+        if not open_log_folder():
+            self._append_log("No se pudo abrir la carpeta de logs.")
+
     def _refresh_adb_status(self):
         """Lanza la comprobación de ADB en segundo plano para no bloquear la UI."""
         self.adb_badge.setText("ADB: comprobando...")
@@ -540,7 +564,7 @@ class MainWindow(QMainWindow):
         self.adb_badge.setText(text)
         self.adb_badge.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px;")
         self.adb_detail.setText(detail)
-        self.log_view.append(f"[{time.strftime('%H:%M:%S')}] [ADB] {detail}")
+        self._append_log(f"[ADB] {detail}")
 
     def _update_status(self, state: str, device_text: str, color_hex: str):
         self.status_dot.setStyleSheet(f"color: {color_hex}; font-size: 18px;")
@@ -574,6 +598,9 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    setup_logging()
+    install_exception_hooks()
+    log_startup_info()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)
