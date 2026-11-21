@@ -59,6 +59,9 @@ jobs:
         viewBox="0 0 64 64"><rect x="6" y="6" width="52" height="52" rx="14" fill="#22C55E"/><text
         x="32" y="40" font-family="sans-serif" font-size="22" font-weight="bold" fill="#FFFFFF"
         text-anchor="middle">USB</text></svg>'' > AppDir/speakerphone-usb.svg
+        cp AppDir/speakerphone-usb.svg AppDir/.DirIcon
+        mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
+        cp AppDir/speakerphone-usb.svg AppDir/usr/share/icons/hicolor/scalable/apps/speakerphone-usb.svg
 
         printf "#!/bin/bash\nHERE=\$(dirname \$(readlink -f \$0))\nexport PATH=\$HERE/usr/bin:\$PATH\nexport
         LD_LIBRARY_PATH=\$HERE/usr/bin:\$LD_LIBRARY_PATH\nexec \$HERE/usr/bin/speakerphone-usb
