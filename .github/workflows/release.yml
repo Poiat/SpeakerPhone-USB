@@ -130,8 +130,9 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en v4.0.13
+          ### Novedades en v4.0.14
 
-          - **Verificación de ADB en todas las plataformas (Linux, Windows y macOS):** la interfaz comprueba al arrancar si `adb` está instalado y realmente responde (`adb version` + `adb start-server`) y muestra un aviso claro: `ADB OK` (con versión y ruta), `ADB NO INSTALADO` (con la instrucción de instalación de cada sistema) o `ADB CON ERROR` (con el detalle del fallo).
-          - **Comprobación no bloqueante:** la verificación corre en segundo plano, puede repetirse con el botón ↻ y su resultado se registra en el log en vivo. En Linux también está disponible en la interfaz de respaldo (Tk).
+          - **Logs persistentes en disco (Linux, Windows y macOS):** todas las líneas del visor de registros se guardan en `speakerphone.log` con rotación de 2 MB por archivo (5 copias). Ubicaciones: `~/.local/state/SpeakerPhone-USB/logs/` en Linux, `%LOCALAPPDATA%\SpeakerPhone-USB\logs\` en Windows y `~/Library/Logs/SpeakerPhone-USB/` en macOS. Se puede cambiar con la variable `SPEAKERPHONE_LOG_DIR`.
+          - **Diagnóstico de fallos:** se registran las excepciones no controladas del hilo principal y de los hilos de trabajo, junto con información del sistema y versión de Python al arrancar.
+          - **Acceso rápido:** nuevo botón **“Abrir carpeta”** en el visor de logs de las tres aplicaciones de escritorio. Si la carpeta preferida no es escribible, se usa una ubicación temporal como respaldo.
         files: artifacts/*
