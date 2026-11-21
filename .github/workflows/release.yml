@@ -112,7 +112,7 @@ jobs:
 
   release:
     name: Publicar GitHub Release
-    needs: build
+    needs: [build, build-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
