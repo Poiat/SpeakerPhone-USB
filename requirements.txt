@@ -3,6 +3,7 @@
 # "Fatal Python error: bool_dealloc" (SIGABRT). Mantener 6.11.2 (verificada)
 # hasta que exista una 6.12.x corregida.
 PySide6==6.11.2
+certifi>=2024.8.30
 numpy>=1.26.0
 PyAudioWPatch>=0.2.12.6; sys_platform == "win32"
 sounddevice>=0.4.6; sys_platform == "linux"

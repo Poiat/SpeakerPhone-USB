@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 
 from app_logger import (
     get_log_path,
@@ -34,6 +35,8 @@ from app_logger import (
     open_log_folder,
     setup_logging,
 )
+from app_version import APP_VERSION
+from update_checker import RELEASES_URL, check_for_update
 
 PKG = "com.usbaudio"
 DEFAULT_PORT = 5000
@@ -717,8 +720,8 @@ class StreamController:
 
 def run_qt_app(qt_binding):
     if qt_binding == "PySide6":
-        from PySide6.QtCore import Qt, Signal, QObject
-        from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction
+        from PySide6.QtCore import Qt, Signal, QObject, QUrl
+        from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PySide6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
@@ -726,8 +729,8 @@ def run_qt_app(qt_binding):
             QMenu, QScrollArea
         )
     else:
-        from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject
-        from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction
+        from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl
+        from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PyQt6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
@@ -775,6 +778,7 @@ def run_qt_app(qt_binding):
         log_sig = Signal(str)
         level_sig = Signal(float, int)
         tools_sig = Signal(str, str)
+        update_sig = Signal(str, str, str, str)
 
     class MainWindow(QWidget):
         def __init__(self, app):
@@ -783,8 +787,9 @@ def run_qt_app(qt_binding):
             self._force_quit = False
             self._status_color = "#eab308"
             self._is_clipping = False
+            self._update_url = RELEASES_URL
 
-            self.setWindowTitle("USB Audio Stream")
+            self.setWindowTitle(f"USB Audio Stream v{APP_VERSION}")
             self.setWindowIcon(make_tray_icon("#3b82f6"))
             self.setMinimumSize(420, 440)
             self.resize(540, 620)
@@ -795,6 +800,7 @@ def run_qt_app(qt_binding):
             self.bridge.log_sig.connect(self._append_log)
             self.bridge.level_sig.connect(self._update_level, Qt.ConnectionType.QueuedConnection)
             self.bridge.tools_sig.connect(self._update_adb_status)
+            self.bridge.update_sig.connect(self._update_check_result)
 
             self.controller = StreamController(
                 on_status=self.bridge.status_sig.emit,
@@ -819,6 +825,7 @@ def run_qt_app(qt_binding):
                 self.controller.start()
 
             self._refresh_adb_status()
+            self._check_updates()
 
         def _build_ui(self):
             outer = QVBoxLayout(self)
@@ -839,12 +846,33 @@ def run_qt_app(qt_binding):
             # Cabecera
             title = QLabel("USB Audio Stream")
             title.setObjectName("titleLabel")
+            version_label = QLabel(f"v{APP_VERSION}")
+            version_label.setObjectName("versionLabel")
+            title_row = QHBoxLayout()
+            title_row.addWidget(title)
+            title_row.addStretch(1)
+            title_row.addWidget(version_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
             subtitle = QLabel("Audio de PipeWire hacia Android por cable USB (ADB) • Reconexión automática")
             subtitle.setObjectName("subtitle")
             subtitle.setWordWrap(True)
 
-            root.addWidget(title)
+            update_row = QHBoxLayout()
+            update_row.setSpacing(8)
+            self.update_label = QLabel("Buscando actualizaciones...")
+            self.update_label.setObjectName("hintLabel")
+            self.update_label.setWordWrap(True)
+            self.update_btn = QPushButton("Descargar")
+            self.update_btn.setObjectName("miniBtn")
+            self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.update_btn.setVisible(False)
+            self.update_btn.clicked.connect(self._open_release_page)
+            update_row.addWidget(self.update_label, 1)
+            update_row.addWidget(self.update_btn)
+
+            root.addLayout(title_row)
             root.addWidget(subtitle)
+            root.addLayout(update_row)
 
             # Tarjeta 1: Estado y Nivel
             main_card = QFrame()
@@ -1086,7 +1114,7 @@ def run_qt_app(qt_binding):
             if not QSystemTrayIcon.isSystemTrayAvailable():
                 return
             self.tray = QSystemTrayIcon(make_tray_icon(self._status_color), self)
-            self.tray.setToolTip("USB Audio Stream")
+            self.tray.setToolTip(f"USB Audio Stream v{APP_VERSION}")
 
             menu = QMenu()
             act_show = QAction("Mostrar / Ocultar ventana", self)
@@ -1162,6 +1190,46 @@ def run_qt_app(qt_binding):
             self.adb_label.setText(detail)
             self._append_log(f"[adb] {detail}")
 
+        def _check_updates(self):
+            """Consulta GitHub Releases en segundo plano."""
+            self.update_label.setText("Buscando actualizaciones...")
+            self.update_btn.setVisible(False)
+            threading.Thread(target=self._update_check_worker, daemon=True).start()
+
+        def _update_check_worker(self):
+            result = check_for_update(APP_VERSION)
+            self.bridge.update_sig.emit(
+                result["status"],
+                result.get("latest") or "",
+                result.get("url") or RELEASES_URL,
+                result.get("error") or "",
+            )
+
+        def _update_check_result(self, status, latest, url, error):
+            self._update_url = url or RELEASES_URL
+            if status == "update":
+                self.update_label.setText(f"Actualización disponible: v{latest}")
+                self.update_btn.setVisible(True)
+                self._append_log(
+                    f"Actualización disponible: v{latest} — {self._update_url}"
+                )
+            elif status == "current":
+                self.update_label.setText(f"Estás al día (v{APP_VERSION})")
+                self.update_btn.setVisible(False)
+                self._append_log(
+                    f"Sin actualizaciones: v{APP_VERSION} es la última versión."
+                )
+            else:
+                self.update_label.setText("No se pudo comprobar si hay actualizaciones.")
+                self.update_btn.setVisible(False)
+                self._append_log(
+                    "No se pudo comprobar si hay actualizaciones"
+                    + (f": {error}" if error else ".")
+                )
+
+        def _open_release_page(self):
+            QDesktopServices.openUrl(QUrl(self._update_url))
+
         def _refresh_sources(self):
             current_data = self.source_combo.currentData()
             self.source_combo.blockSignals(True)
@@ -1223,7 +1291,7 @@ def run_qt_app(qt_binding):
             self.dot.setStyleSheet(f"color: {self._status_color}; font-size: 15px;")
             self.status_label.setText(text)
             if self.tray:
-                self.tray.setToolTip(f"USB Audio Stream — {text}")
+                self.tray.setToolTip(f"USB Audio Stream v{APP_VERSION} — {text}")
             self._refresh_tray_icon()
 
         def _update_level(self, level, clipping):
@@ -1296,6 +1364,11 @@ def run_qt_app(qt_binding):
                     font-size: 18px;
                     font-weight: bold;
                     color: #f8fafc;
+                }
+                QLabel#versionLabel {
+                    color: #8b93a5;
+                    font-size: 11px;
+                    font-weight: 600;
                 }
                 QLabel#subtitle {
                     color: #9aa0ae;
@@ -1450,7 +1523,7 @@ def run_tk_app():
     from tkinter import ttk, scrolledtext
 
     root = tk.Tk()
-    root.title("USB Audio Stream")
+    root.title(f"USB Audio Stream v{APP_VERSION}")
     root.geometry("540x600")
     root.minsize(420, 440)
     root.configure(bg="#16181d")
@@ -1460,8 +1533,23 @@ def run_tk_app():
 
     hdr = tk.Frame(root, bg="#16181d")
     hdr.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
-    tk.Label(hdr, text="USB Audio Stream", bg="#16181d", fg="#f3f4f6", font=("Sans", 14, "bold")).pack(anchor="w")
+    tk.Label(hdr, text=f"USB Audio Stream v{APP_VERSION}", bg="#16181d", fg="#f3f4f6", font=("Sans", 14, "bold")).pack(anchor="w")
     tk.Label(hdr, text="Audio de PipeWire hacia Android por cable USB (ADB)", bg="#16181d", fg="#9aa0ae", font=("Sans", 9)).pack(anchor="w")
+
+    update_var = tk.StringVar(value="Buscando actualizaciones...")
+    update_row = tk.Frame(hdr, bg="#16181d")
+    update_row.pack(fill="x", pady=(4, 0))
+    update_lbl = tk.Label(update_row, textvariable=update_var, bg="#16181d", fg="#9aa0ae", font=("Sans", 8), justify="left", anchor="w")
+    update_lbl.pack(side="left", fill="x", expand=True)
+    update_url_holder = {"url": RELEASES_URL}
+
+    def open_update_url():
+        webbrowser.open(update_url_holder["url"])
+
+    update_btn = tk.Button(
+        update_row, text="Descargar", command=open_update_url, bg="#2563eb",
+        fg="#ffffff", relief="flat", font=("Sans", 8, "bold"), padx=8,
+    )
 
     card = tk.Frame(root, bg="#1f232b", highlightbackground="#2e3440", highlightthickness=1)
     card.grid(row=1, column=0, sticky="ew", padx=18, pady=4)
@@ -1638,6 +1726,32 @@ def run_tk_app():
 
     adb_btn.config(command=check_adb_async)
 
+    def check_updates_async():
+        def _work():
+            result = check_for_update(APP_VERSION)
+
+            def _apply():
+                status = result["status"]
+                if status == "update":
+                    latest = result.get("latest") or ""
+                    update_url_holder["url"] = result.get("url") or RELEASES_URL
+                    update_var.set(f"Actualización disponible: v{latest}")
+                    update_btn.pack(side="right", padx=(8, 0))
+                    append_log(f"Actualización disponible: v{latest} — {update_url_holder['url']}")
+                elif status == "current":
+                    update_var.set(f"Estás al día (v{APP_VERSION})")
+                    update_btn.pack_forget()
+                    append_log(f"Sin actualizaciones: v{APP_VERSION} es la última versión.")
+                else:
+                    update_var.set("No se pudo comprobar si hay actualizaciones.")
+                    update_btn.pack_forget()
+                    error = result.get("error") or "sin conexión"
+                    append_log(f"No se pudo comprobar si hay actualizaciones: {error}")
+
+            root.after(0, _apply)
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def update_level(level, clipping):
         def _draw():
             w = vu_canvas.winfo_width() or 440
@@ -1715,6 +1829,7 @@ def run_tk_app():
             dev_lbl.configure(wraplength=wrap)
             st_lbl.configure(wraplength=wrap - 30)
             adb_detail_lbl.configure(wraplength=wrap - 60)
+            update_lbl.configure(wraplength=wrap)
 
     root.bind("<Configure>", on_configure)
 
@@ -1726,6 +1841,7 @@ def run_tk_app():
         ctrl.start()
 
     check_adb_async()
+    check_updates_async()
 
     def on_close():
         ctrl.stop()

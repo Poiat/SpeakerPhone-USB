@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit,
     QProgressBar, QSystemTrayIcon, QMenu, QGroupBox
 )
-from PySide6.QtCore import Qt, Signal, QObject
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont
+from PySide6.QtCore import Qt, Signal, QObject, QUrl
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont, QDesktopServices
 
 from app_logger import (
     get_log_path,
@@ -28,6 +28,8 @@ from app_logger import (
     open_log_folder,
     setup_logging,
 )
+from app_version import APP_VERSION
+from update_checker import RELEASES_URL, check_for_update
 
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
@@ -95,6 +97,7 @@ class WorkerSignals(QObject):
     status_changed = Signal(str, str, str)
     level_updated = Signal(float, bool)
     adb_checked = Signal(str, str)
+    update_checked = Signal(str, str, str, str)
 
 
 class AudioStreamWorker(threading.Thread):
@@ -320,8 +323,9 @@ class AudioStreamWorker(threading.Thread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SpeakerPhone-USB v4.0 (macOS)")
+        self.setWindowTitle(f"SpeakerPhone-USB v{APP_VERSION} (macOS)")
         self.setMinimumSize(540, 520)
+        self._update_url = RELEASES_URL
         self.signals = WorkerSignals()
         self.worker = AudioStreamWorker(self.signals)
         self._init_ui()
@@ -329,6 +333,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._populate_audio_devices()
         self._refresh_adb_status()
+        self._check_updates()
         self.worker.start()
 
     def _create_app_icon(self, color_hex="#2ECC71") -> QIcon:
@@ -382,6 +387,17 @@ class MainWindow(QMainWindow):
         adb_row.addWidget(self.adb_detail, 1)
         adb_row.addWidget(self.btn_adb_check)
         status_vbox.addLayout(adb_row)
+
+        update_row = QHBoxLayout()
+        self.update_label = QLabel("Buscando actualizaciones...")
+        self.update_label.setStyleSheet("color: #7F8C8D; font-size: 11px;")
+        self.update_label.setWordWrap(True)
+        self.update_button = QPushButton("Descargar")
+        self.update_button.setVisible(False)
+        self.update_button.clicked.connect(self._open_release_page)
+        update_row.addWidget(self.update_label, 1)
+        update_row.addWidget(self.update_button)
+        status_vbox.addLayout(update_row)
 
         layout.addWidget(status_group)
 
@@ -442,9 +458,12 @@ class MainWindow(QMainWindow):
         log_group = QGroupBox("Registros en Vivo")
         log_layout = QVBoxLayout(log_group)
         log_header = QHBoxLayout()
+        self.version_label = QLabel(f"v{APP_VERSION}")
+        self.version_label.setStyleSheet("color: #95A5A6; font-size: 11px; font-weight: bold;")
         btn_open_logs = QPushButton("Abrir carpeta de logs")
         btn_open_logs.setToolTip(get_log_path() or "Carpeta de logs no disponible")
         btn_open_logs.clicked.connect(self._open_log_folder)
+        log_header.addWidget(self.version_label)
         log_header.addStretch(1)
         log_header.addWidget(btn_open_logs)
         log_layout.addLayout(log_header)
@@ -476,6 +495,7 @@ class MainWindow(QMainWindow):
         self.signals.status_changed.connect(self._update_status)
         self.signals.level_updated.connect(self._update_meter)
         self.signals.adb_checked.connect(self._on_adb_checked)
+        self.signals.update_checked.connect(self._on_update_checked)
         self.btn_retry.clicked.connect(self._on_retry)
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_adb_check.clicked.connect(self._refresh_adb_status)
@@ -569,6 +589,42 @@ class MainWindow(QMainWindow):
         self.adb_badge.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px;")
         self.adb_detail.setText(detail)
         self._append_log(f"[ADB] {detail}")
+
+    def _check_updates(self):
+        """Consulta GitHub Releases en segundo plano."""
+        self.update_label.setText("Buscando actualizaciones...")
+        self.update_button.setVisible(False)
+        threading.Thread(target=self._update_check_worker, daemon=True).start()
+
+    def _update_check_worker(self):
+        result = check_for_update(APP_VERSION)
+        self.signals.update_checked.emit(
+            result["status"],
+            result.get("latest") or "",
+            result.get("url") or RELEASES_URL,
+            result.get("error") or "",
+        )
+
+    def _on_update_checked(self, status: str, latest: str, url: str, error: str):
+        self._update_url = url or RELEASES_URL
+        if status == "update":
+            self.update_label.setText(f"Actualización disponible: v{latest}")
+            self.update_button.setVisible(True)
+            self._append_log(f"Actualización disponible: v{latest} — {self._update_url}")
+        elif status == "current":
+            self.update_label.setText(f"Estás al día (v{APP_VERSION})")
+            self.update_button.setVisible(False)
+            self._append_log(f"Sin actualizaciones: v{APP_VERSION} es la última versión.")
+        else:
+            self.update_label.setText("No se pudo comprobar si hay actualizaciones.")
+            self.update_button.setVisible(False)
+            self._append_log(
+                "No se pudo comprobar si hay actualizaciones"
+                + (f": {error}" if error else ".")
+            )
+
+    def _open_release_page(self):
+        QDesktopServices.openUrl(QUrl(self._update_url))
 
     def _update_status(self, state: str, device_text: str, color_hex: str):
         self.status_dot.setStyleSheet(f"color: {color_hex}; font-size: 18px;")
