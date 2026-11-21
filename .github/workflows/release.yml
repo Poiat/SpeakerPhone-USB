@@ -130,8 +130,8 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en v4.0.12
+          ### Novedades en v4.0.13
 
-          - **Indicador de estado ADB en la interfaz (Linux):** la ventana ahora comprueba si `adb` está instalado y realmente funciona (`adb version` + `adb start-server`) y muestra un aviso claro: `ADB OK` (con versión y ruta), `ADB NO INSTALADO` (con el comando de instalación) o `ADB CON ERROR` (con el detalle del fallo).
-          - **Comprobación no bloqueante:** la verificación corre en segundo plano, puede repetirse con el botón ↻ y su resultado se registra en el log en vivo. También está disponible en la interfaz de respaldo (Tk).
+          - **Verificación de ADB en todas las plataformas (Linux, Windows y macOS):** la interfaz comprueba al arrancar si `adb` está instalado y realmente responde (`adb version` + `adb start-server`) y muestra un aviso claro: `ADB OK` (con versión y ruta), `ADB NO INSTALADO` (con la instrucción de instalación de cada sistema) o `ADB CON ERROR` (con el detalle del fallo).
+          - **Comprobación no bloqueante:** la verificación corre en segundo plano, puede repetirse con el botón ↻ y su resultado se registra en el log en vivo. En Linux también está disponible en la interfaz de respaldo (Tk).
         files: artifacts/*

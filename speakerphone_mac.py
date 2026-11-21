@@ -1,7 +1,9 @@
 import sys
 import os
+import re
 import time
 import math
+import shutil
 import socket
 import struct
 import subprocess
@@ -31,10 +33,58 @@ def get_adb_path() -> str:
     return "adb"
 
 
+def _run_adb_cmd(exe: str, args: list, timeout: int) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [exe] + args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def check_adb_health() -> tuple[str, str]:
+    """
+    Comprueba si ADB está instalado y funciona de verdad (binario ejecutable y
+    servidor capaz de arrancar). Devuelve (estado, detalle), donde estado es
+    'ok', 'missing' o 'error'.
+    """
+    path = get_adb_path()
+    resolved = path if os.path.isabs(path) and os.path.exists(path) else shutil.which(path)
+    missing_msg = (
+        "ADB no está instalado. Instálalo con: brew install android-platform-tools"
+    )
+    if not resolved:
+        return "missing", missing_msg
+    try:
+        version_res = _run_adb_cmd(resolved, ["version"], 5)
+        output = (version_res.stdout or "").strip()
+        if version_res.returncode != 0:
+            detail = output.splitlines()[-1] if output else f"código de salida {version_res.returncode}"
+            return "error", f"ADB está instalado pero no funciona: {detail}"
+        version = ""
+        m = re.search(r"^Version\s+(\S+)", output, re.MULTILINE)
+        if m:
+            version = f" v{m.group(1)}"
+        server_res = _run_adb_cmd(resolved, ["start-server"], 10)
+        if server_res.returncode != 0:
+            output = (server_res.stdout or "").strip()
+            detail = output.splitlines()[-1] if output else f"código de salida {server_res.returncode}"
+            return "error", f"ADB está instalado pero no funciona: {detail}"
+        return "ok", f"ADB{version} instalado y funcionando ({resolved})."
+    except subprocess.TimeoutExpired:
+        return "error", "ADB está instalado pero no responde (tiempo de espera agotado)."
+    except FileNotFoundError:
+        return "missing", missing_msg
+    except Exception as e:
+        return "error", f"ADB está instalado pero no funciona: {e}"
+
+
 class WorkerSignals(QObject):
     log = Signal(str)
     status_changed = Signal(str, str, str)
     level_updated = Signal(float, bool)
+    adb_checked = Signal(str, str)
 
 
 class AudioStreamWorker(threading.Thread):
@@ -268,6 +318,7 @@ class MainWindow(QMainWindow):
         self._init_tray()
         self._connect_signals()
         self._populate_audio_devices()
+        self._refresh_adb_status()
         self.worker.start()
 
     def _create_app_icon(self, color_hex="#2ECC71") -> QIcon:
@@ -291,7 +342,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
 
         status_group = QGroupBox("Estado de Conexion USB / ADB")
-        status_layout = QHBoxLayout(status_group)
+        status_vbox = QVBoxLayout(status_group)
+
+        status_layout = QHBoxLayout()
         self.status_dot = QLabel("●")
         self.status_dot.setStyleSheet("color: #E74C3C; font-size: 18px;")
         self.status_label = QLabel("Iniciando...")
@@ -304,6 +357,22 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.device_label, 1)
         status_layout.addWidget(self.btn_retry)
         status_layout.addWidget(self.btn_toggle)
+        status_vbox.addLayout(status_layout)
+
+        adb_row = QHBoxLayout()
+        self.adb_badge = QLabel("ADB: comprobando...")
+        self.adb_badge.setStyleSheet("color: #95A5A6; font-weight: bold; font-size: 11px;")
+        self.adb_detail = QLabel("Verificando si adb está instalado y responde...")
+        self.adb_detail.setStyleSheet("color: #7F8C8D; font-size: 11px;")
+        self.adb_detail.setWordWrap(True)
+        self.btn_adb_check = QPushButton("↻")
+        self.btn_adb_check.setFixedWidth(32)
+        self.btn_adb_check.setToolTip("Volver a comprobar si adb está instalado y funciona")
+        adb_row.addWidget(self.adb_badge)
+        adb_row.addWidget(self.adb_detail, 1)
+        adb_row.addWidget(self.btn_adb_check)
+        status_vbox.addLayout(adb_row)
+
         layout.addWidget(status_group)
 
         audio_group = QGroupBox("Fuente de Audio, Ganancia y Latencia (CoreAudio)")
@@ -387,8 +456,10 @@ class MainWindow(QMainWindow):
         self.signals.log.connect(lambda m: self.log_view.append(f"[{time.strftime('%H:%M:%S')}] {m}"))
         self.signals.status_changed.connect(self._update_status)
         self.signals.level_updated.connect(self._update_meter)
+        self.signals.adb_checked.connect(self._on_adb_checked)
         self.btn_retry.clicked.connect(self._on_retry)
         self.btn_toggle.clicked.connect(self._on_toggle)
+        self.btn_adb_check.clicked.connect(self._refresh_adb_status)
         self.btn_refresh_dev.clicked.connect(self._populate_audio_devices)
         self.combo_devices.currentIndexChanged.connect(self._on_device_changed)
         self.slider_gain.valueChanged.connect(self._on_gain_changed)
@@ -447,6 +518,29 @@ class MainWindow(QMainWindow):
         else:
             self.btn_toggle.setText("Iniciar")
             self.worker.set_paused(True)
+
+    def _refresh_adb_status(self):
+        """Lanza la comprobación de ADB en segundo plano para no bloquear la UI."""
+        self.adb_badge.setText("ADB: comprobando...")
+        self.adb_badge.setStyleSheet("color: #95A5A6; font-weight: bold; font-size: 11px;")
+        self.adb_detail.setText("Verificando si adb está instalado y responde...")
+        threading.Thread(target=self._adb_check_worker, daemon=True).start()
+
+    def _adb_check_worker(self):
+        state, detail = check_adb_health()
+        self.signals.adb_checked.emit(state, detail)
+
+    def _on_adb_checked(self, state: str, detail: str):
+        styles = {
+            "ok": ("ADB OK", "#2ECC71"),
+            "missing": ("ADB NO INSTALADO", "#E74C3C"),
+            "error": ("ADB CON ERROR", "#F39C12"),
+        }
+        text, color = styles.get(state, ("ADB: ?", "#95A5A6"))
+        self.adb_badge.setText(text)
+        self.adb_badge.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px;")
+        self.adb_detail.setText(detail)
+        self.log_view.append(f"[{time.strftime('%H:%M:%S')}] [ADB] {detail}")
 
     def _update_status(self, state: str, device_text: str, color_hex: str):
         self.status_dot.setStyleSheet(f"color: {color_hex}; font-size: 18px;")
