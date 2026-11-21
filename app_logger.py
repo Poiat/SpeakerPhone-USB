@@ -129,7 +129,7 @@ def setup_logging(level=logging.INFO, console=False, log_dir=None):
             logger.addHandler(logging.NullHandler())
 
         if console:
-            stream_handler = logging.StreamHandler()
+            stream_handler = logging.StreamHandler(encoding="utf-8")
             stream_handler.setFormatter(formatter)
             logger.addHandler(stream_handler)
 

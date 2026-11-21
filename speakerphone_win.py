@@ -3,6 +3,7 @@ import os
 import re
 import json
 import time
+import traceback
 import math
 import shutil
 import socket
@@ -29,11 +30,13 @@ from app_logger import (
 )
 from app_icon import get_icon_path
 from app_settings import load_settings, save_settings
+from app_theme_qt import apply_theme
 from app_version import APP_VERSION
 from dsp import process_pcm_s16le
 from protocol import pack_header
 from update_checker import RELEASES_URL, check_for_update
 from update_window_qt import UpdateWindow
+from theme import valid_theme
 from updater import can_self_update
 
 CREATE_NO_WINDOW = 0x08000000
@@ -283,14 +286,39 @@ class AudioStreamWorker(threading.Thread):
                 sock.settimeout(None)
                 sock.sendall(pack_header(rate, ch, chunk_ms))
 
-                self._stream = self._pa.open(
-                    format=pyaudio.paInt16,
-                    channels=ch,
-                    rate=rate,
-                    input=True,
-                    input_device_index=dev_idx,
-                    frames_per_buffer=frames
-                )
+                try:
+                    self._stream = self._pa.open(
+                        format=pyaudio.paInt16,
+                        channels=ch,
+                        rate=rate,
+                        input=True,
+                        input_device_index=dev_idx,
+                        frames_per_buffer=frames
+                    )
+                except OSError as audio_err:
+                    fallback_idx = None
+                    for idx in range(self._pa.get_device_count()):
+                        info_d = self._pa.get_device_info_by_index(idx)
+                        if int(info_d.get("maxInputChannels", 0)) > 0 and idx != dev_idx:
+                            fallback_idx = idx
+                            break
+                    if fallback_idx is not None:
+                        self.signals.log.emit(f"[Audio] Fallo {dev_idx} ({dev_info.get('name')}): {audio_err}. Probando {fallback_idx}...")
+                        dev_idx = fallback_idx
+                        dev_info = self._pa.get_device_info_by_index(dev_idx)
+                        rate = int(dev_info.get("defaultSampleRate", DEFAULT_RATE))
+                        ch = max(1, min(2, int(dev_info.get("maxInputChannels", DEFAULT_CHANNELS))))
+                        frames = max(128, int(rate * chunk_ms / 1000))
+                        self._stream = self._pa.open(
+                            format=pyaudio.paInt16,
+                            channels=ch,
+                            rate=rate,
+                            input=True,
+                            input_device_index=dev_idx,
+                            frames_per_buffer=frames
+                        )
+                    else:
+                        raise
 
                 dev_title = dev_info["name"]
                 self.signals.status_changed.emit("Transmitiendo", f"{info} ({rate} Hz)", "#2ECC71")
@@ -308,7 +336,7 @@ class AudioStreamWorker(threading.Thread):
                         self.signals.level_updated.emit(lvl, clip)
                         last_ui = now
 
-            except (ConnectionRefusedError, ConnectionError, socket.timeout, BrokenPipeError, OSError) as e:
+            except (ConnectionRefusedError, ConnectionError, socket.timeout, BrokenPipeError) as e:
                 if last_state != "waiting_app":
                     self.signals.status_changed.emit("Reconectando...", info, "#F39C12")
                     self.signals.log.emit(f"[Stream] Esperando app Android en puerto {self.tcp_port} ({e})")
@@ -316,8 +344,16 @@ class AudioStreamWorker(threading.Thread):
                 self._close_connections()
                 self.signals.level_updated.emit(0.0, False)
                 time.sleep(1.2)
+            except OSError as e:
+                self.signals.status_changed.emit("Error de audio/red", str(e), "#E74C3C")
+                self.signals.log.emit(f"[Audio/OS] {e}")
+                self.signals.log.emit(traceback.format_exc())
+                self._close_connections()
+                self.signals.level_updated.emit(0.0, False)
+                time.sleep(1.5)
             except Exception as e:
                 self.signals.log.emit(f"[Error] {e}")
+                self.signals.log.emit(traceback.format_exc())
                 self._close_connections()
                 time.sleep(1.5)
             finally:
@@ -333,10 +369,13 @@ class MainWindow(QMainWindow):
         self._latest_update = None
         self._update_window = None
         self._auto_prompted_version = ""
+        self._theme = valid_theme(load_settings().get("theme", "dark"))
         self._settings_ready = False
         self.signals = WorkerSignals()
         self.worker = AudioStreamWorker(self.signals)
         self._init_ui()
+        self._apply_accessibility()
+        self._apply_theme()
         self._init_tray()
         self._connect_signals()
         self._populate_audio_devices()
@@ -497,10 +536,15 @@ class MainWindow(QMainWindow):
         log_header = QHBoxLayout()
         self.version_label = QLabel(f"v{APP_VERSION}")
         self.version_label.setStyleSheet("color: #95A5A6; font-size: 11px; font-weight: bold;")
+        self.theme_button = QPushButton("☀ Claro")
+        self.theme_button.setToolTip("Cambiar entre tema oscuro y claro")
+        self.theme_button.setAccessibleName("Cambiar tema")
+        self.theme_button.clicked.connect(self._toggle_theme)
         btn_open_logs = QPushButton("Abrir carpeta de logs")
         btn_open_logs.setToolTip(get_log_path() or "Carpeta de logs no disponible")
         btn_open_logs.clicked.connect(self._open_log_folder)
         log_header.addWidget(self.version_label)
+        log_header.addWidget(self.theme_button)
         log_header.addStretch(1)
         log_header.addWidget(btn_open_logs)
         log_layout.addLayout(log_header)
@@ -608,8 +652,44 @@ class MainWindow(QMainWindow):
                 "soft_limiter": self.chk_limiter.isChecked(),
                 "profile": profile_data[0] if profile_data else "",
                 "device_name": self.combo_devices.currentText(),
+                "theme": self._theme,
             }
         )
+
+    def _apply_theme(self):
+        apply_theme(QApplication.instance(), self._theme)
+        if self._theme == "light":
+            self.theme_button.setText("🌙 Oscuro")
+            self.theme_button.setToolTip("Cambiar al tema oscuro")
+            self.theme_button.setAccessibleDescription("Cambiar al tema oscuro")
+        else:
+            self.theme_button.setText("☀ Claro")
+            self.theme_button.setToolTip("Cambiar al tema claro")
+            self.theme_button.setAccessibleDescription("Cambiar al tema claro")
+
+    def _toggle_theme(self):
+        self._theme = "light" if self._theme == "dark" else "dark"
+        self._apply_theme()
+        self._save_settings()
+
+    def _apply_accessibility(self):
+        self.setAccessibleName("SpeakerPhone-USB")
+        self.device_label.setAccessibleName("Dispositivo conectado")
+        self.status_label.setAccessibleName("Estado de conexión")
+        self.adb_badge.setAccessibleName("Estado de ADB")
+        self.adb_detail.setAccessibleName("Detalle del estado de ADB")
+        self.update_label.setAccessibleName("Estado de actualizaciones")
+        self.update_button.setAccessibleName("Actualizar aplicación")
+        self.update_check_button.setAccessibleName("Buscar actualizaciones")
+        self.combo_devices.setAccessibleName("Fuente de audio")
+        self.combo_profile.setAccessibleName("Perfil de búfer")
+        self.slider_gain.setAccessibleName("Ganancia")
+        self.chk_limiter.setAccessibleName("Limitador suave")
+        self.vu_meter.setAccessibleName("Nivel de señal")
+        self.clip_badge.setAccessibleName("Estado de saturación")
+        self.btn_retry.setAccessibleName("Reintentar conexión")
+        self.btn_toggle.setAccessibleName("Iniciar o detener transmisión")
+        self.log_view.setAccessibleName("Registro de eventos")
 
     def _on_device_changed(self, combo_idx: int):
         dev_idx = self.combo_devices.itemData(combo_idx)
