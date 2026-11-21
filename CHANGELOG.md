@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20
+
+- Actualización en vivo en PC: ventana con barra de progreso, descarga automática, verificación SHA-256 y aplicación/relanzamiento en Linux, Windows y macOS.
+- Botón de actualizaciones manual en Android.
+- Versión 0.20 en PC y Android.
+
 ## 0.19
 
 - Protocolo v1 con magic, versión y `chunk_ms`; Android ajusta la lectura al paquete del PC.

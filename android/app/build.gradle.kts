@@ -16,7 +16,7 @@ android {
         versionName = System.getenv("VERSION_NAME")
             ?.takeIf { it.isNotBlank() }
             ?.removePrefix("v")
-            ?: "0.19"
+            ?: "0.20"
     }
 
     signingConfigs {

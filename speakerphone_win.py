@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import json
 import time
 import math
 import shutil
@@ -32,6 +33,8 @@ from app_version import APP_VERSION
 from dsp import process_pcm_s16le
 from protocol import pack_header
 from update_checker import RELEASES_URL, check_for_update
+from update_window_qt import UpdateWindow
+from updater import can_self_update
 
 CREATE_NO_WINDOW = 0x08000000
 os.environ.setdefault("ANDROID_ADB_SERVER_PORT", "5038")
@@ -100,7 +103,7 @@ class WorkerSignals(QObject):
     status_changed = Signal(str, str, str)
     level_updated = Signal(float, bool)
     adb_checked = Signal(str, str)
-    update_checked = Signal(str, str, str, str)
+    update_checked = Signal(str)
 
 
 class AudioStreamWorker(threading.Thread):
@@ -327,6 +330,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"SpeakerPhone-USB v{APP_VERSION} (Windows)")
         self.setMinimumSize(540, 520)
         self._update_url = RELEASES_URL
+        self._latest_update = None
+        self._update_window = None
+        self._auto_prompted_version = ""
         self._settings_ready = False
         self.signals = WorkerSignals()
         self.worker = AudioStreamWorker(self.signals)
@@ -424,7 +430,7 @@ class MainWindow(QMainWindow):
         self.update_check_button.clicked.connect(self._check_updates)
         self.update_button = QPushButton("Descargar")
         self.update_button.setVisible(False)
-        self.update_button.clicked.connect(self._open_release_page)
+        self.update_button.clicked.connect(self._open_update_window)
         update_row.addWidget(self.update_label, 1)
         update_row.addWidget(self.update_check_button)
         update_row.addWidget(self.update_button)
@@ -680,21 +686,31 @@ class MainWindow(QMainWindow):
 
     def _update_check_worker(self):
         result = check_for_update(APP_VERSION)
-        self.signals.update_checked.emit(
-            result["status"],
-            result.get("latest") or "",
-            result.get("url") or RELEASES_URL,
-            result.get("error") or "",
-        )
+        self.signals.update_checked.emit(json.dumps(result))
 
-    def _on_update_checked(self, status: str, latest: str, url: str, error: str):
-        self._update_url = url or RELEASES_URL
+    def _on_update_checked(self, payload: str):
+        try:
+            result = json.loads(payload)
+        except Exception:
+            result = {"status": "error", "error": "respuesta inválida"}
+
+        status = result.get("status")
+        latest = result.get("latest") or ""
+        error = result.get("error") or ""
+        self._update_url = result.get("url") or RELEASES_URL
         self.update_check_button.setEnabled(True)
         self.update_check_button.setText("Buscar actualizaciones")
+
         if status == "update":
+            self._latest_update = result
             self.update_label.setText(f"Actualización disponible: v{latest}")
             self.update_button.setVisible(True)
+            has_asset = bool(result.get("asset_url")) and can_self_update()
+            self.update_button.setText("Actualizar" if has_asset else "Descargar")
             self._append_log(f"Actualización disponible: v{latest} — {self._update_url}")
+            if has_asset and latest and latest != self._auto_prompted_version:
+                self._auto_prompted_version = latest
+                self._open_update_window()
         elif status == "current":
             self.update_label.setText(f"Estás al día (v{APP_VERSION})")
             self.update_button.setVisible(False)
@@ -706,6 +722,28 @@ class MainWindow(QMainWindow):
                 "No se pudo comprobar si hay actualizaciones"
                 + (f": {error}" if error else ".")
             )
+
+    def _open_update_window(self):
+        update = self._latest_update
+        if not update or not update.get("asset_url") or not can_self_update():
+            self._open_release_page()
+            return
+        if self._update_window is not None and self._update_window.isVisible():
+            self._update_window.raise_()
+            self._update_window.activateWindow()
+            return
+        if not self.isVisible():
+            self.show()
+        self._update_window = UpdateWindow(self, update, self._finish_update)
+        self._update_window.show()
+        self._update_window.raise_()
+        self._update_window.activateWindow()
+
+    def _finish_update(self):
+        self._save_settings()
+        self.worker.stop()
+        self.tray_icon.hide()
+        QApplication.quit()
 
     def _open_release_page(self):
         QDesktopServices.openUrl(QUrl(self._update_url))

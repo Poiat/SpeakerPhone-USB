@@ -10,6 +10,7 @@ bloquear la interfaz.
 import json
 import re
 import ssl
+import sys
 import urllib.request
 
 from app_version import APP_VERSION
@@ -42,7 +43,7 @@ def version_tuple(value):
     return tuple(int(part) for part in normalized.split("."))
 
 
-def _ssl_context():
+def ssl_context():
     """Contexto TLS con el bundle de certifi si está disponible."""
     if certifi is not None:
         try:
@@ -50,6 +51,31 @@ def _ssl_context():
         except Exception:
             pass
     return ssl.create_default_context()
+
+
+def select_asset(assets, system=None):
+    """Selecciona el asset de la release para la plataforma actual."""
+    system = (system or sys.platform).lower()
+    if system.startswith("win"):
+        token, suffix = "windows", ".exe"
+    elif system == "darwin":
+        token, suffix = "macos", ".zip"
+    else:
+        token, suffix = "linux", ".appimage"
+
+    for asset in assets or []:
+        name = str(asset.get("name") or "")
+        lowered = name.lower()
+        if token in lowered and lowered.endswith(suffix):
+            return asset
+    return None
+
+
+def find_checksum_asset(assets):
+    for asset in assets or []:
+        if str(asset.get("name") or "").lower() == "sha256sums.txt":
+            return asset
+    return None
 
 
 def check_for_update(current=APP_VERSION, timeout=DEFAULT_TIMEOUT):
@@ -62,6 +88,8 @@ def check_for_update(current=APP_VERSION, timeout=DEFAULT_TIMEOUT):
       latest:  versión remota normalizada ('' si no se pudo obtener)
       url:     página de la release para descargar
       error:   detalle del fallo (None si todo fue bien)
+      asset_name/asset_url/asset_size: paquete de la plataforma actual
+      checksums_url: URL de SHA256SUMS.txt, si existe
     """
     current_norm = normalize_version(current) or str(current)
     result = {
@@ -70,6 +98,10 @@ def check_for_update(current=APP_VERSION, timeout=DEFAULT_TIMEOUT):
         "latest": "",
         "url": RELEASES_URL,
         "error": None,
+        "asset_name": "",
+        "asset_url": "",
+        "asset_size": 0,
+        "checksums_url": "",
     }
 
     request = urllib.request.Request(
@@ -82,7 +114,7 @@ def check_for_update(current=APP_VERSION, timeout=DEFAULT_TIMEOUT):
 
     try:
         with urllib.request.urlopen(
-            request, timeout=timeout, context=_ssl_context()
+            request, timeout=timeout, context=ssl_context()
         ) as response:
             payload = json.load(response)
     except Exception as exc:
@@ -96,6 +128,17 @@ def check_for_update(current=APP_VERSION, timeout=DEFAULT_TIMEOUT):
 
     result["latest"] = latest_norm
     result["url"] = payload.get("html_url") or RELEASES_URL
+
+    assets = payload.get("assets") or []
+    asset = select_asset(assets)
+    if asset:
+        result["asset_name"] = str(asset.get("name") or "")
+        result["asset_url"] = str(asset.get("browser_download_url") or "")
+        result["asset_size"] = int(asset.get("size") or 0)
+    checksum_asset = find_checksum_asset(assets)
+    if checksum_asset:
+        result["checksums_url"] = str(checksum_asset.get("browser_download_url") or "")
+
     if version_tuple(latest_norm) > version_tuple(current_norm):
         result["status"] = "update"
     else:

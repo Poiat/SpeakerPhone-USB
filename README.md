@@ -96,7 +96,9 @@ Los logs rotan cada 2 MB (5 copias). Se puede cambiar la carpeta con `SPEAKERPHO
 
 ## Actualizaciones
 
-Las apps de PC consultan `https://api.github.com/repos/Poiat/SpeakerPhone-USB/releases/latest` al iniciar y cada 6 horas. Solo leen metadatos; no descargan ni ejecutan binarios. El botón **Buscar actualizaciones** permite repetir la consulta y **Descargar** abre la página del release. La app Android incluye el mismo botón de consulta manual.
+Las apps de PC consultan `https://api.github.com/repos/Poiat/SpeakerPhone-USB/releases/latest` al iniciar y cada 6 horas. Cuando hay una versión nueva, abren una ventana con barra de progreso, descargan el paquete de la plataforma, verifican su SHA-256 contra `SHA256SUMS.txt` y aplican la actualización reiniciando la app. La descarga se puede cancelar; si la app no está empaquetada o la carpeta no es escribible, se conserva el paquete y se ofrece la carpeta para instalarlo manualmente.
+
+El botón **Buscar actualizaciones** permite repetir la consulta. La app Android incluye el mismo botón de consulta manual y abre la descarga del APK.
 
 ---
 

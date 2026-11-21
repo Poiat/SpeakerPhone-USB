@@ -13,6 +13,7 @@ Novedades v4:
   * Layout fluido y adaptable que se ajusta naturalmente al tamaño de la ventana sin escalar tipografías artificialmente
 """
 from collections import deque
+import json
 import math
 import os
 import re
@@ -39,6 +40,7 @@ from app_version import APP_VERSION
 from dsp import process_pcm_s16le
 from protocol import pack_header
 from update_checker import RELEASES_URL, check_for_update
+from updater import UpdateCancelled, apply_update, can_self_update, download_update
 
 PKG = "com.usbaudio"
 DEFAULT_PORT = 5000
@@ -725,7 +727,7 @@ def run_qt_app(qt_binding):
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
             QCheckBox, QFrame, QPlainTextEdit, QProgressBar, QSystemTrayIcon,
-            QMenu, QScrollArea
+            QMenu, QScrollArea, QDialog
         )
     else:
         from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl, QTimer
@@ -734,7 +736,7 @@ def run_qt_app(qt_binding):
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
             QCheckBox, QFrame, QPlainTextEdit, QProgressBar, QSystemTrayIcon,
-            QMenu, QScrollArea
+            QMenu, QScrollArea, QDialog
         )
 
     _icon_cache = {}
@@ -800,7 +802,7 @@ def run_qt_app(qt_binding):
         log_sig = Signal(str)
         level_sig = Signal(float, int)
         tools_sig = Signal(str, str)
-        update_sig = Signal(str, str, str, str)
+        update_sig = Signal(str)
 
     class MainWindow(QWidget):
         def __init__(self, app):
@@ -811,6 +813,9 @@ def run_qt_app(qt_binding):
             self._is_clipping = False
             self._update_url = RELEASES_URL
             self._settings_ready = False
+            self._latest_update = None
+            self._update_window = None
+            self._auto_prompted_version = ""
 
             self.setWindowTitle(f"USB Audio Stream v{APP_VERSION}")
             self.setWindowIcon(make_tray_icon("#3b82f6"))
@@ -896,7 +901,7 @@ def run_qt_app(qt_binding):
             self.update_btn.setObjectName("miniBtn")
             self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.update_btn.setVisible(False)
-            self.update_btn.clicked.connect(self._open_release_page)
+            self.update_btn.clicked.connect(self._open_update_window)
             self.update_check_btn = QPushButton("Buscar actualizaciones")
             self.update_check_btn.setObjectName("miniBtn")
             self.update_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1237,23 +1242,33 @@ def run_qt_app(qt_binding):
 
         def _update_check_worker(self):
             result = check_for_update(APP_VERSION)
-            self.bridge.update_sig.emit(
-                result["status"],
-                result.get("latest") or "",
-                result.get("url") or RELEASES_URL,
-                result.get("error") or "",
-            )
+            self.bridge.update_sig.emit(json.dumps(result))
 
-        def _update_check_result(self, status, latest, url, error):
-            self._update_url = url or RELEASES_URL
+        def _update_check_result(self, payload):
+            try:
+                result = json.loads(payload)
+            except Exception:
+                result = {"status": "error", "error": "respuesta inválida"}
+
+            status = result.get("status")
+            latest = result.get("latest") or ""
+            error = result.get("error") or ""
+            self._update_url = result.get("url") or RELEASES_URL
             self.update_check_btn.setEnabled(True)
             self.update_check_btn.setText("Buscar actualizaciones")
+
             if status == "update":
+                self._latest_update = result
                 self.update_label.setText(f"Actualización disponible: v{latest}")
                 self.update_btn.setVisible(True)
+                has_asset = bool(result.get("asset_url")) and can_self_update()
+                self.update_btn.setText("Actualizar" if has_asset else "Descargar")
                 self._append_log(
                     f"Actualización disponible: v{latest} — {self._update_url}"
                 )
+                if has_asset and latest and latest != self._auto_prompted_version:
+                    self._auto_prompted_version = latest
+                    self._open_update_window()
             elif status == "current":
                 self.update_label.setText(f"Estás al día (v{APP_VERSION})")
                 self.update_btn.setVisible(False)
@@ -1267,6 +1282,29 @@ def run_qt_app(qt_binding):
                     "No se pudo comprobar si hay actualizaciones"
                     + (f": {error}" if error else ".")
                 )
+
+        def _open_update_window(self):
+            update = self._latest_update
+            if not update or not update.get("asset_url") or not can_self_update():
+                self._open_release_page()
+                return
+            if self._update_window is not None and self._update_window.isVisible():
+                self._update_window.raise_()
+                self._update_window.activateWindow()
+                return
+            if not self.isVisible():
+                self.show()
+            self._update_window = UpdateWindow(self, update, self._finish_update)
+            self._update_window.show()
+            self._update_window.raise_()
+            self._update_window.activateWindow()
+
+        def _finish_update(self):
+            self._save_settings()
+            self.controller.stop()
+            if self.tray:
+                self.tray.hide()
+            self.app.quit()
 
         def _open_release_page(self):
             QDesktopServices.openUrl(QUrl(self._update_url))
@@ -1619,6 +1657,139 @@ def run_qt_app(qt_binding):
                 }
             """)
 
+    class UpdateWindow(QDialog):
+        progress_sig = Signal(int, int)
+        status_sig = Signal(str)
+        result_sig = Signal(bool, str, str)
+
+        def __init__(self, parent, update, on_quit):
+            super().__init__(parent)
+            self.update = update
+            self.on_quit = on_quit
+            self.cancel_event = threading.Event()
+            self.workdir = ""
+            self.folder = ""
+
+            self.setWindowTitle(f"Actualización v{update.get('latest', '')}")
+            self.setWindowFlag(Qt.WindowType.Window, True)
+            self.setMinimumWidth(480)
+            self.setStyleSheet("""
+                QDialog { background-color: #16181d; }
+                QLabel { color: #e6e8ee; font-size: 12px; }
+                QLabel#titleLabel { font-size: 17px; font-weight: bold; color: #f8fafc; }
+                QProgressBar { background-color: #111317; border: 1px solid #2e3440;
+                               border-radius: 5px; }
+                QProgressBar::chunk { background-color: #2563eb; border-radius: 4px; }
+                QPushButton { background-color: #282d37; border: 1px solid #3a4150;
+                              border-radius: 8px; padding: 7px 14px; color: #e6e8ee;
+                              font-weight: 600; }
+                QPushButton:hover { background-color: #323845; }
+            """)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(20, 18, 20, 16)
+            layout.setSpacing(10)
+
+            title = QLabel(f"Actualizando a v{update.get('latest', '')}")
+            title.setObjectName("titleLabel")
+            self.info = QLabel("Preparando descarga...")
+            self.info.setWordWrap(True)
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 1000)
+            self.progress.setTextVisible(False)
+            self.progress.setFixedHeight(16)
+            self.detail = QLabel("")
+            self.detail.setWordWrap(True)
+            self.detail.setStyleSheet("color: #9aa0ae; font-size: 11px;")
+
+            buttons = QHBoxLayout()
+            self.folder_btn = QPushButton("Abrir carpeta")
+            self.folder_btn.setVisible(False)
+            self.folder_btn.clicked.connect(self._open_folder)
+            self.cancel_btn = QPushButton("Cancelar")
+            self.cancel_btn.clicked.connect(self._cancel)
+            self.close_btn = QPushButton("Cerrar")
+            self.close_btn.setVisible(False)
+            self.close_btn.clicked.connect(self.close)
+            buttons.addWidget(self.folder_btn)
+            buttons.addStretch(1)
+            buttons.addWidget(self.cancel_btn)
+            buttons.addWidget(self.close_btn)
+
+            layout.addWidget(title)
+            layout.addWidget(self.info)
+            layout.addWidget(self.progress)
+            layout.addWidget(self.detail)
+            layout.addLayout(buttons)
+
+            self.progress_sig.connect(self._on_progress)
+            self.status_sig.connect(self._on_status)
+            self.result_sig.connect(self._on_result)
+            QTimer.singleShot(100, self.start_download)
+
+        def start_download(self):
+            asset = self.update.get("asset_name") or "paquete"
+            self.status_sig.emit(f"Descargando {asset}...")
+            threading.Thread(target=self._worker, daemon=True).start()
+
+        def _worker(self):
+            try:
+                path, workdir = download_update(
+                    self.update, self.progress_sig.emit, self.cancel_event
+                )
+                self.workdir = workdir
+                if self.cancel_event.is_set():
+                    raise UpdateCancelled()
+                self.status_sig.emit("Verificando y aplicando la actualización...")
+                result = apply_update(path, self.update.get("asset_name") or "")
+                self.result_sig.emit(result.ok, result.message, result.folder or "")
+            except UpdateCancelled:
+                self.result_sig.emit(False, "Actualización cancelada.", "")
+            except Exception as exc:
+                self.result_sig.emit(False, f"No se pudo actualizar: {exc}", self.workdir)
+
+        def _on_progress(self, written, total):
+            if total > 0:
+                if self.progress.maximum() != 1000:
+                    self.progress.setRange(0, 1000)
+                self.progress.setValue(int(written * 1000 / total))
+                self.detail.setText(
+                    f"{written / 1048576:.1f} / {total / 1048576:.1f} MB"
+                )
+            else:
+                self.progress.setRange(0, 0)
+                self.detail.setText(f"{written / 1048576:.1f} MB")
+
+        def _on_status(self, text):
+            self.info.setText(text)
+
+        def _on_result(self, ok, message, folder):
+            self.cancel_btn.setVisible(False)
+            self.close_btn.setVisible(True)
+            self.info.setText(message)
+            self.folder = folder
+            if ok:
+                self.progress.setRange(0, 1000)
+                self.progress.setValue(1000)
+                self.detail.setText("La aplicación se reiniciará con la versión nueva.")
+                QTimer.singleShot(1200, self.on_quit)
+            elif folder:
+                self.folder_btn.setVisible(True)
+                self.detail.setText(f"Carpeta: {folder}")
+
+        def _open_folder(self):
+            if self.folder:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.folder))
+
+        def _cancel(self):
+            self.cancel_event.set()
+            self.status_sig.emit("Cancelando...")
+            self.close()
+
+        def closeEvent(self, event):
+            self.cancel_event.set()
+            super().closeEvent(event)
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     win = MainWindow(app)
@@ -1659,13 +1830,23 @@ def run_tk_app():
     update_lbl = tk.Label(update_row, textvariable=update_var, bg="#16181d", fg="#9aa0ae", font=("Sans", 8), justify="left", anchor="w")
     update_lbl.pack(side="left", fill="x", expand=True)
     update_url_holder = {"url": RELEASES_URL}
+    latest_update = {"data": None}
+    auto_prompted = {"version": ""}
+    update_window_holder = {"win": None}
 
     def open_update_url():
         webbrowser.open(update_url_holder["url"])
 
+    def request_update_action():
+        update = latest_update["data"]
+        if update and update.get("asset_url") and can_self_update():
+            open_update_window(update)
+        else:
+            open_update_url()
+
     update_btn = tk.Button(
-        update_row, text="Descargar", command=open_update_url, bg="#2563eb",
-        fg="#ffffff", relief="flat", font=("Sans", 8, "bold"), padx=8,
+        update_row, text="Descargar", command=lambda: request_update_action(),
+        bg="#2563eb", fg="#ffffff", relief="flat", font=("Sans", 8, "bold"), padx=8,
     )
     check_update_btn = tk.Button(
         update_row, text="Buscar actualizaciones", command=lambda: check_updates_async(),
@@ -1859,10 +2040,17 @@ def run_tk_app():
                 status = result["status"]
                 if status == "update":
                     latest = result.get("latest") or ""
+                    latest_update["data"] = result
                     update_url_holder["url"] = result.get("url") or RELEASES_URL
                     update_var.set(f"Actualización disponible: v{latest}")
+                    has_asset = bool(result.get("asset_url")) and can_self_update()
+                    update_btn.config(text="Actualizar" if has_asset else "Descargar")
                     update_btn.pack(side="right", padx=(8, 0))
                     append_log(f"Actualización disponible: v{latest} — {update_url_holder['url']}")
+                    if (has_asset and latest
+                            and latest != auto_prompted["version"]):
+                        auto_prompted["version"] = latest
+                        open_update_window(result)
                 elif status == "current":
                     update_var.set(f"Estás al día (v{APP_VERSION})")
                     update_btn.pack_forget()
@@ -1961,6 +2149,131 @@ def run_tk_app():
             ctrl.set_latency(cap_spin.get(), chk_spin.get())
 
         settings_ready["value"] = True
+
+    def open_update_window(update):
+        existing = update_window_holder["win"]
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = tk.Toplevel(root)
+        update_window_holder["win"] = win
+        win.title(f"Actualización v{update.get('latest', '')}")
+        win.configure(bg="#16181d")
+        win.geometry("500x230")
+        win.transient(root)
+        cancel_event = threading.Event()
+        folder_holder = {"folder": ""}
+        progress_state = {"indeterminate": False}
+
+        tk.Label(
+            win, text=f"Actualizando a v{update.get('latest', '')}",
+            bg="#16181d", fg="#f8fafc", font=("Sans", 13, "bold"),
+        ).pack(anchor="w", padx=18, pady=(16, 6))
+        info_var = tk.StringVar(value="Preparando descarga...")
+        tk.Label(
+            win, textvariable=info_var, bg="#16181d", fg="#e6e8ee",
+            font=("Sans", 9), wraplength=460, justify="left", anchor="w",
+        ).pack(fill="x", padx=18)
+        progress = ttk.Progressbar(win, orient="horizontal", mode="determinate", maximum=1000)
+        progress.pack(fill="x", padx=18, pady=(10, 4))
+        detail_var = tk.StringVar(value="")
+        tk.Label(
+            win, textvariable=detail_var, bg="#16181d", fg="#9aa0ae",
+            font=("Sans", 8), wraplength=460, justify="left", anchor="w",
+        ).pack(fill="x", padx=18)
+
+        buttons = tk.Frame(win, bg="#16181d")
+        buttons.pack(fill="x", padx=18, pady=(10, 12))
+
+        def close_window():
+            cancel_event.set()
+            update_window_holder["win"] = None
+            win.destroy()
+
+        def open_folder():
+            folder = folder_holder["folder"]
+            if not folder:
+                return
+            try:
+                if sys.platform.startswith("win"):
+                    os.startfile(folder)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", folder])
+                else:
+                    subprocess.Popen(["xdg-open", folder])
+            except Exception:
+                pass
+
+        folder_btn = tk.Button(
+            buttons, text="Abrir carpeta", command=open_folder,
+            bg="#282d37", fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
+        )
+        cancel_btn = tk.Button(
+            buttons, text="Cancelar", command=close_window,
+            bg="#282d37", fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=12,
+        )
+        cancel_btn.pack(side="right")
+
+        def on_progress(written, total):
+            if not win.winfo_exists():
+                return
+            if total > 0:
+                if progress_state["indeterminate"]:
+                    progress.stop()
+                    progress_state["indeterminate"] = False
+                progress.configure(mode="determinate", maximum=1000)
+                progress["value"] = int(written * 1000 / total)
+                detail_var.set(f"{written / 1048576:.1f} / {total / 1048576:.1f} MB")
+            else:
+                progress.configure(mode="indeterminate")
+                progress.start(80)
+                progress_state["indeterminate"] = True
+                detail_var.set(f"{written / 1048576:.1f} MB")
+
+        def finish(ok, message, folder):
+            if not win.winfo_exists():
+                return
+            if progress_state["indeterminate"]:
+                progress.stop()
+                progress_state["indeterminate"] = False
+            info_var.set(message)
+            cancel_btn.config(text="Cerrar", command=close_window)
+            if ok:
+                progress.configure(mode="determinate", maximum=1000)
+                progress["value"] = 1000
+                detail_var.set("La aplicación se reiniciará con la versión nueva.")
+                root.after(
+                    1200,
+                    lambda: (save_settings_tk(), ctrl.stop(), root.destroy()),
+                )
+            elif folder:
+                folder_holder["folder"] = folder
+                folder_btn.pack(side="left")
+                detail_var.set(f"Carpeta: {folder}")
+
+        def worker():
+            try:
+                path, _workdir = download_update(
+                    update,
+                    lambda written, total: root.after(
+                        0, lambda: on_progress(written, total)
+                    ),
+                    cancel_event,
+                )
+                root.after(0, lambda: info_var.set("Verificando y aplicando..."))
+                result = apply_update(path, update.get("asset_name") or "")
+                root.after(0, lambda: finish(result.ok, result.message, result.folder))
+            except UpdateCancelled:
+                root.after(0, lambda: finish(False, "Actualización cancelada.", ""))
+            except Exception as exc:
+                root.after(
+                    0, lambda: finish(False, f"No se pudo actualizar: {exc}", "")
+                )
+
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_gain_changed(value):
         ctrl.set_gain_db(float(value))

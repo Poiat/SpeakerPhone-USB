@@ -168,14 +168,14 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.19
+          ### Novedades en 0.20
 
-          - **Protocolo v1 (actualiza PC y Android juntos):** el handshake ahora incluye magic, versión y `chunk_ms`. Android lee exactamente el tamaño de paquete que envía el PC, en lugar de usar 10 ms fijos. Los binarios 0.19 no son compatibles con APKs antiguos ni viceversa.
-          - **DSP compartido y vectorizado:** ganancia, limitador suave y medidor usan NumPy en las tres apps de PC, eliminando el bucle muestra por muestra de Linux (importante a 96 kHz).
-          - **Ajustes persistentes:** perfil de búfer, fuente, frecuencia, ganancia, limitador y dispositivo de audio se restauran al reiniciar.
-          - **Android más robusto:** audio focus (pausa al usar otra app el audio), reconstrucción de `AudioTrack` al cambiar la salida USB/Bluetooth, WakeLock sin caducidad de 6 h y botón **Buscar actualizaciones** que consulta GitHub y abre la descarga.
-          - **Diagnóstico de conexión:** mejores mensajes de protocolo y preferencia por el dispositivo ADB listo cuando hay varios conectados.
-          - **Limpieza:** el sink virtual huérfano de Linux se libera al arrancar; corregido el filtro CoreAudio de macOS.
-          - **CI y calidad:** tests de protocolo/DSP/ajustes/updates, validación de versión contra el tag, checksums SHA-256 en el release y build Linux en cada PR. El APK se firma con keystore si están configurados los secrets `ANDROID_KEYSTORE_*`; si no, se mantiene el APK debug con aviso.
-          - **Versión visible:** `v0.19` en las apps de PC y en Android.
+          - **Actualización en vivo (Linux, Windows y macOS):** al detectar una versión nueva se abre una ventana con barra de progreso, se descarga el paquete de la plataforma y se verifica su SHA-256 contra `SHA256SUMS.txt`. Si todo es correcto, la actualización se aplica y la app se reinicia:
+            - **Linux/AppImage:** reemplaza el AppImage en uso y lo relanza.
+            - **Windows:** un helper reemplaza el `.exe` al cerrar y lo vuelve a abrir.
+            - **macOS:** reemplaza el bundle `.app` y lo relanza.
+          - La descarga puede cancelarse. Si la app no está empaquetada o no puede reemplazarse, se conserva el paquete descargado y se ofrece la carpeta para instalarlo manualmente.
+          - **Actualización manual en Android:** botón **Buscar actualizaciones** que consulta GitHub y abre la descarga del APK.
+          - **Nota:** los usuarios de 0.19 deben instalar 0.20 una vez manualmente; a partir de 0.20 las siguientes versiones se actualizan desde la propia app.
+          - **Versión visible:** `v0.20` en las apps de PC y en Android.
         files: artifacts/*
