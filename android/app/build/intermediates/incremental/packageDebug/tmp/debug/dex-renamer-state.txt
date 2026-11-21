@@ -1,7 +1,7 @@
-#Fri Nov 20 17:23:32 GMT-05:00 2026
-base.0=/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/intermediates/dex/debug/mergeExtDexDebug/classes.dex
-base.1=/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/intermediates/dex/debug/mergeProjectDexDebug/0/classes.dex
-base.2=/home/joseph/Descargas/PkgEditor-0.3/usb-audio-stream/android/app/build/intermediates/dex/debug/mergeProjectDexDebug/11/classes.dex
+#Fri Nov 20 19:59:29 GMT-05:00 2026
+base.0=/home/joseph/Documentos/Proyecto/android/app/build/intermediates/dex/debug/mergeExtDexDebug/classes.dex
+base.1=/home/joseph/Documentos/Proyecto/android/app/build/intermediates/dex/debug/mergeProjectDexDebug/0/classes.dex
+base.2=/home/joseph/Documentos/Proyecto/android/app/build/intermediates/dex/debug/mergeProjectDexDebug/11/classes.dex
 path.0=classes.dex
 path.1=0/classes.dex
 path.2=11/classes.dex
