@@ -130,9 +130,8 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en v4.0.11
+          ### Novedades en v4.0.12
 
-          - **Estabilidad en Linux (AppImage / PySide6):** Cast explícito a `float`/`bool` nativos en `level_sig` y conexión con `Qt.ConnectionType.QueuedConnection` para evitar `bool_dealloc` (`SIGABRT`) durante la transmisión de audio.
-          - **App Android (`SpeakerPhone-USB-Android.apk`):** Interfaz oscura con indicador de versión, selector de búfer (`24 ms`, `36 ms`, `48 ms`), visualización del dispositivo de salida/conexión activo y telemetría de formato e *underruns*.
-          - **CI/CD Multi-OS + Android:** Corrección de `.DirIcon` en `AppDir` para `appimagetool`, compilación del APK en `build-android` y publicación conjunta en los assets del release.
+          - **Indicador de estado ADB en la interfaz (Linux):** la ventana ahora comprueba si `adb` está instalado y realmente funciona (`adb version` + `adb start-server`) y muestra un aviso claro: `ADB OK` (con versión y ruta), `ADB NO INSTALADO` (con el comando de instalación) o `ADB CON ERROR` (con el detalle del fallo).
+          - **Comprobación no bloqueante:** la verificación corre en segundo plano, puede repetirse con el botón ↻ y su resultado se registra en el log en vivo. También está disponible en la interfaz de respaldo (Tk).
         files: artifacts/*

@@ -64,6 +64,38 @@ def check_dependencies():
     return [tool for tool in ("adb", "parec", "pactl") if not shutil.which(tool)]
 
 
+def check_adb_health():
+    """
+    Comprueba si ADB está instalado y realmente funciona (binario ejecutable y
+    servidor capaz de arrancar/responde). Devuelve (estado, detalle), donde
+    estado es 'ok', 'missing' o 'error'.
+    """
+    path = shutil.which("adb")
+    if not path:
+        return "missing", (
+            "ADB no está instalado. Instálalo con: "
+            "sudo pacman -S --needed android-tools"
+        )
+    try:
+        version_out = run_cmd(["adb", "version"], timeout=5)
+        version = ""
+        m = re.search(r"^Version\s+(\S+)", version_out, re.MULTILINE)
+        if m:
+            version = f" v{m.group(1)}"
+        run_cmd(["adb", "start-server"], timeout=10)
+        return "ok", f"ADB{version} instalado y funcionando ({path})."
+    except subprocess.TimeoutExpired:
+        return "error", "ADB está instalado pero no responde (tiempo de espera agotado)."
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or e.stdout or "").strip()
+        detail = err.splitlines()[-1] if err else f"código de salida {e.returncode}"
+        return "error", f"ADB está instalado pero no funciona: {detail}"
+    except FileNotFoundError:
+        return "missing", "ADB no está instalado o el ejecutable no es accesible."
+    except Exception as e:
+        return "error", f"ADB está instalado pero no funciona: {e}"
+
+
 def detect_pipewire_native_rate():
     """Detecta la frecuencia nativa actual del servidor PipeWire/PulseAudio."""
     try:
@@ -709,6 +741,7 @@ def run_qt_app(qt_binding):
         device_sig = Signal(str, str)
         log_sig = Signal(str)
         level_sig = Signal(float, int)
+        tools_sig = Signal(str, str)
 
     class MainWindow(QWidget):
         def __init__(self, app):
@@ -728,6 +761,7 @@ def run_qt_app(qt_binding):
             self.bridge.device_sig.connect(self._update_device)
             self.bridge.log_sig.connect(self._append_log)
             self.bridge.level_sig.connect(self._update_level, Qt.ConnectionType.QueuedConnection)
+            self.bridge.tools_sig.connect(self._update_adb_status)
 
             self.controller = StreamController(
                 on_status=self.bridge.status_sig.emit,
@@ -750,6 +784,8 @@ def run_qt_app(qt_binding):
                 )
             else:
                 self.controller.start()
+
+            self._refresh_adb_status()
 
         def _build_ui(self):
             outer = QVBoxLayout(self)
@@ -816,6 +852,29 @@ def run_qt_app(qt_binding):
             sep2.setFrameShape(QFrame.Shape.HLine)
             sep2.setObjectName("sep")
             mc.addWidget(sep2)
+
+            adb_hdr = QHBoxLayout()
+            adb_hdr.setSpacing(8)
+            adb_title = QLabel("ADB (DEPURACIÓN USB)")
+            adb_title.setObjectName("sectionLabel")
+            self.adb_badge = QLabel("ADB: comprobando...")
+            self.adb_badge.setObjectName("adbNeutral")
+            self.adb_recheck_btn = QPushButton("↻")
+            self.adb_recheck_btn.setObjectName("miniBtn")
+            self.adb_recheck_btn.setFixedWidth(30)
+            self.adb_recheck_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.adb_recheck_btn.setToolTip("Volver a comprobar si adb está instalado y funciona")
+            self.adb_recheck_btn.clicked.connect(self._refresh_adb_status)
+            adb_hdr.addWidget(adb_title)
+            adb_hdr.addStretch(1)
+            adb_hdr.addWidget(self.adb_badge)
+            adb_hdr.addWidget(self.adb_recheck_btn)
+            mc.addLayout(adb_hdr)
+
+            self.adb_label = QLabel("Verificando si adb está instalado y responde...")
+            self.adb_label.setObjectName("hintLabel")
+            self.adb_label.setWordWrap(True)
+            mc.addWidget(self.adb_label)
 
             lvl_header = QHBoxLayout()
             lvl_title = QLabel("NIVEL DE SEÑAL Y SATURACIÓN")
@@ -1029,6 +1088,37 @@ def run_qt_app(qt_binding):
                 self.tray.hide()
             self.app.quit()
 
+        @staticmethod
+        def _repolish(widget):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
+        def _refresh_adb_status(self):
+            """Lanza la comprobación de ADB en segundo plano para no bloquear la UI."""
+            self.adb_badge.setText("ADB: comprobando...")
+            self.adb_badge.setObjectName("adbNeutral")
+            self.adb_label.setText("Verificando si adb está instalado y responde...")
+            self._repolish(self.adb_badge)
+            threading.Thread(target=self._adb_check_worker, daemon=True).start()
+
+        def _adb_check_worker(self):
+            state, detail = check_adb_health()
+            self.bridge.tools_sig.emit(state, detail)
+
+        def _update_adb_status(self, state, detail):
+            if state == "ok":
+                self.adb_badge.setText("ADB OK")
+                self.adb_badge.setObjectName("adbOk")
+            elif state == "missing":
+                self.adb_badge.setText("ADB NO INSTALADO")
+                self.adb_badge.setObjectName("adbError")
+            else:
+                self.adb_badge.setText("ADB CON ERROR")
+                self.adb_badge.setObjectName("adbWarn")
+            self._repolish(self.adb_badge)
+            self.adb_label.setText(detail)
+            self._append_log(f"[adb] {detail}")
+
         def _refresh_sources(self):
             current_data = self.source_combo.currentData()
             self.source_combo.blockSignals(True)
@@ -1200,6 +1290,46 @@ def run_qt_app(qt_binding):
                     font-size: 10px;
                     font-weight: bold;
                 }
+                QLabel#hintLabel {
+                    color: #9aa0ae;
+                    font-size: 11px;
+                }
+                QLabel#adbOk {
+                    background-color: #193226;
+                    color: #4ade80;
+                    border: 1px solid #22543d;
+                    border-radius: 5px;
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QLabel#adbWarn {
+                    background-color: #3b2a12;
+                    color: #fbbf24;
+                    border: 1px solid #b45309;
+                    border-radius: 5px;
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QLabel#adbError {
+                    background-color: #451a1a;
+                    color: #fca5a5;
+                    border: 1px solid #ef4444;
+                    border-radius: 5px;
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QLabel#adbNeutral {
+                    background-color: #282d37;
+                    color: #cfd5e2;
+                    border: 1px solid #3a4150;
+                    border-radius: 5px;
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
                 QProgressBar {
                     background-color: #111317;
                     border: 1px solid #2e3440;
@@ -1308,6 +1438,23 @@ def run_tk_app():
 
     tk.Frame(card, bg="#2e3440", height=1).pack(fill="x", padx=14)
 
+    adb_hdr = tk.Frame(card, bg="#1f232b")
+    adb_hdr.pack(fill="x", padx=14, pady=(8, 2))
+    tk.Label(adb_hdr, text="ADB (DEPURACIÓN USB)", bg="#1f232b", fg="#8b93a5", font=("Sans", 8, "bold")).pack(side="left")
+
+    adb_var = tk.StringVar(value="ADB: comprobando...")
+    adb_lbl = tk.Label(adb_hdr, textvariable=adb_var, bg="#1f232b", fg="#e6e8ee", font=("Sans", 8, "bold"))
+    adb_lbl.pack(side="right")
+
+    adb_btn = tk.Button(adb_hdr, text="↻", bg="#282d37", fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=4)
+    adb_btn.pack(side="right", padx=(0, 8))
+
+    adb_detail_var = tk.StringVar(value="Verificando si adb está instalado y responde...")
+    adb_detail_lbl = tk.Label(card, textvariable=adb_detail_var, bg="#1f232b", fg="#9aa0ae", font=("Sans", 8), justify="left", anchor="w")
+    adb_detail_lbl.pack(anchor="w", padx=14, pady=(0, 8), fill="x")
+
+    tk.Frame(card, bg="#2e3440", height=1).pack(fill="x", padx=14)
+
     lvl_hdr = tk.Frame(card, bg="#1f232b")
     lvl_hdr.pack(fill="x", padx=14, pady=(8, 4))
     tk.Label(lvl_hdr, text="NIVEL DE SEÑAL", bg="#1f232b", fg="#8b93a5", font=("Sans", 8, "bold")).pack(side="left")
@@ -1386,6 +1533,33 @@ def run_tk_app():
         c = colors.get(code, "#9ca3af")
         root.after(0, lambda: (dot_lbl.config(fg=c), status_var.set(text)))
 
+    def update_adb_status(state, detail):
+        styles = {
+            "ok": ("ADB OK", "#4ade80"),
+            "missing": ("ADB NO INSTALADO", "#ef4444"),
+            "error": ("ADB CON ERROR", "#f59e0b"),
+        }
+        label_text, color = styles.get(state, ("ADB: ?", "#9ca3af"))
+        root.after(0, lambda: (
+            adb_var.set(label_text),
+            adb_lbl.config(fg=color),
+            adb_detail_var.set(detail),
+        ))
+
+    def check_adb_async():
+        adb_var.set("ADB: comprobando...")
+        adb_lbl.config(fg="#e6e8ee")
+        adb_detail_var.set("Verificando si adb está instalado y responde...")
+
+        def _work():
+            state, detail = check_adb_health()
+            update_adb_status(state, detail)
+            append_log(f"[adb] {detail}")
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    adb_btn.config(command=check_adb_async)
+
     def update_level(level, clipping):
         def _draw():
             w = vu_canvas.winfo_width() or 440
@@ -1451,6 +1625,7 @@ def run_tk_app():
             wrap = max(260, event.width - 80)
             dev_lbl.configure(wraplength=wrap)
             st_lbl.configure(wraplength=wrap - 30)
+            adb_detail_lbl.configure(wraplength=wrap - 60)
 
     root.bind("<Configure>", on_configure)
 
@@ -1460,6 +1635,8 @@ def run_tk_app():
         append_log("Instala: sudo pacman -S --needed android-tools libpulse pipewire-pulse")
     else:
         ctrl.start()
+
+    check_adb_async()
 
     def on_close():
         ctrl.stop()
