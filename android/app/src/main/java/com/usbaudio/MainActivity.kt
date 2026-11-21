@@ -27,7 +27,7 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
     companion object {
-        const val APP_VERSION = "v0.17"
+        const val APP_VERSION = "v0.18"
         private const val PREFS_NAME = "usbaudio_prefs"
         private const val KEY_BUFFER_MS = "buffer_ms"
 

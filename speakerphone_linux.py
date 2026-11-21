@@ -35,6 +35,7 @@ from app_logger import (
     open_log_folder,
     setup_logging,
 )
+from app_icon import get_icon_path
 from app_version import APP_VERSION
 from update_checker import RELEASES_URL, check_for_update
 
@@ -739,6 +740,24 @@ def run_qt_app(qt_binding):
         )
 
     _icon_cache = {}
+    _base_icon_loaded = False
+    _base_icon = None
+
+    def get_base_icon():
+        nonlocal _base_icon_loaded, _base_icon
+        if not _base_icon_loaded:
+            _base_icon_loaded = True
+            path = get_icon_path()
+            if path:
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    _base_icon = pixmap.scaled(
+                        64,
+                        64,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+        return _base_icon
 
     def make_tray_icon(dot_color_hex):
         if dot_color_hex in _icon_cache:
@@ -747,18 +766,23 @@ def run_qt_app(qt_binding):
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QColor("#1e293b"))
-        p.setPen(QColor("#3b82f6"))
-        p.drawRoundedRect(4, 4, 56, 56, 14, 14)
 
-        pen = p.pen()
-        pen.setColor(QColor("#ffffff"))
-        pen.setWidth(5)
-        p.setPen(pen)
-        p.drawArc(18, 16, 28, 28, 0, 180 * 16)
-        p.setBrush(QColor("#ffffff"))
-        p.drawRoundedRect(14, 30, 7, 14, 3, 3)
-        p.drawRoundedRect(43, 30, 7, 14, 3, 3)
+        base = get_base_icon()
+        if base is not None:
+            p.drawPixmap(0, 0, base)
+        else:
+            p.setBrush(QColor("#1e293b"))
+            p.setPen(QColor("#3b82f6"))
+            p.drawRoundedRect(4, 4, 56, 56, 14, 14)
+
+            pen = p.pen()
+            pen.setColor(QColor("#ffffff"))
+            pen.setWidth(5)
+            p.setPen(pen)
+            p.drawArc(18, 16, 28, 28, 0, 180 * 16)
+            p.setBrush(QColor("#ffffff"))
+            p.drawRoundedRect(14, 30, 7, 14, 3, 3)
+            p.drawRoundedRect(43, 30, 7, 14, 3, 3)
 
         p.setPen(QColor("#0f172a"))
         p.setBrush(QColor(dot_color_hex))
@@ -867,7 +891,13 @@ def run_qt_app(qt_binding):
             self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.update_btn.setVisible(False)
             self.update_btn.clicked.connect(self._open_release_page)
+            self.update_check_btn = QPushButton("Buscar actualizaciones")
+            self.update_check_btn.setObjectName("miniBtn")
+            self.update_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.update_check_btn.setToolTip("Volver a comprobar si hay una versión nueva")
+            self.update_check_btn.clicked.connect(self._check_updates)
             update_row.addWidget(self.update_label, 1)
+            update_row.addWidget(self.update_check_btn)
             update_row.addWidget(self.update_btn)
 
             root.addLayout(title_row)
@@ -1194,6 +1224,8 @@ def run_qt_app(qt_binding):
             """Consulta GitHub Releases en segundo plano."""
             self.update_label.setText("Buscando actualizaciones...")
             self.update_btn.setVisible(False)
+            self.update_check_btn.setEnabled(False)
+            self.update_check_btn.setText("Buscando...")
             threading.Thread(target=self._update_check_worker, daemon=True).start()
 
         def _update_check_worker(self):
@@ -1207,6 +1239,8 @@ def run_qt_app(qt_binding):
 
         def _update_check_result(self, status, latest, url, error):
             self._update_url = url or RELEASES_URL
+            self.update_check_btn.setEnabled(True)
+            self.update_check_btn.setText("Buscar actualizaciones")
             if status == "update":
                 self.update_label.setText(f"Actualización disponible: v{latest}")
                 self.update_btn.setVisible(True)
@@ -1528,6 +1562,15 @@ def run_tk_app():
     root.minsize(420, 440)
     root.configure(bg="#16181d")
 
+    icon_path = get_icon_path()
+    if icon_path:
+        try:
+            _app_icon = tk.PhotoImage(file=icon_path)
+            root.iconphoto(True, _app_icon)
+            root._app_icon = _app_icon
+        except Exception:
+            pass
+
     root.columnconfigure(0, weight=1)
     root.rowconfigure(5, weight=1)
 
@@ -1550,6 +1593,11 @@ def run_tk_app():
         update_row, text="Descargar", command=open_update_url, bg="#2563eb",
         fg="#ffffff", relief="flat", font=("Sans", 8, "bold"), padx=8,
     )
+    check_update_btn = tk.Button(
+        update_row, text="Buscar actualizaciones", command=lambda: check_updates_async(),
+        bg="#282d37", fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
+    )
+    check_update_btn.pack(side="right")
 
     card = tk.Frame(root, bg="#1f232b", highlightbackground="#2e3440", highlightthickness=1)
     card.grid(row=1, column=0, sticky="ew", padx=18, pady=4)
@@ -1727,10 +1775,13 @@ def run_tk_app():
     adb_btn.config(command=check_adb_async)
 
     def check_updates_async():
+        check_update_btn.config(state="disabled", text="Buscando...")
+
         def _work():
             result = check_for_update(APP_VERSION)
 
             def _apply():
+                check_update_btn.config(state="normal", text="Buscar actualizaciones")
                 status = result["status"]
                 if status == "update":
                     latest = result.get("latest") or ""

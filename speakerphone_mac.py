@@ -28,6 +28,7 @@ from app_logger import (
     open_log_folder,
     setup_logging,
 )
+from app_icon import get_icon_path
 from app_version import APP_VERSION
 from update_checker import RELEASES_URL, check_for_update
 
@@ -341,12 +342,31 @@ class MainWindow(QMainWindow):
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
+
+        icon_path = get_icon_path()
+        base = QPixmap(icon_path) if icon_path else QPixmap()
+        if not base.isNull():
+            painter.drawPixmap(
+                0,
+                0,
+                base.scaled(
+                    64,
+                    64,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                ),
+            )
+        else:
+            painter.setBrush(QColor(color_hex))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(6, 6, 52, 52, 14, 14)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.setFont(QFont("Helvetica Neue", 24, QFont.Bold))
+            painter.drawText(pixmap.rect(), Qt.AlignCenter, "USB")
+
+        painter.setPen(QColor("#0f172a"))
         painter.setBrush(QColor(color_hex))
-        painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(6, 6, 52, 52, 14, 14)
-        painter.setPen(QColor("#FFFFFF"))
-        painter.setFont(QFont("Helvetica Neue", 24, QFont.Bold))
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "USB")
+        painter.drawEllipse(42, 42, 18, 18)
         painter.end()
         return QIcon(pixmap)
 
@@ -392,10 +412,14 @@ class MainWindow(QMainWindow):
         self.update_label = QLabel("Buscando actualizaciones...")
         self.update_label.setStyleSheet("color: #7F8C8D; font-size: 11px;")
         self.update_label.setWordWrap(True)
+        self.update_check_button = QPushButton("Buscar actualizaciones")
+        self.update_check_button.setToolTip("Volver a comprobar si hay una versión nueva")
+        self.update_check_button.clicked.connect(self._check_updates)
         self.update_button = QPushButton("Descargar")
         self.update_button.setVisible(False)
         self.update_button.clicked.connect(self._open_release_page)
         update_row.addWidget(self.update_label, 1)
+        update_row.addWidget(self.update_check_button)
         update_row.addWidget(self.update_button)
         status_vbox.addLayout(update_row)
 
@@ -594,6 +618,8 @@ class MainWindow(QMainWindow):
         """Consulta GitHub Releases en segundo plano."""
         self.update_label.setText("Buscando actualizaciones...")
         self.update_button.setVisible(False)
+        self.update_check_button.setEnabled(False)
+        self.update_check_button.setText("Buscando...")
         threading.Thread(target=self._update_check_worker, daemon=True).start()
 
     def _update_check_worker(self):
@@ -607,6 +633,8 @@ class MainWindow(QMainWindow):
 
     def _on_update_checked(self, status: str, latest: str, url: str, error: str):
         self._update_url = url or RELEASES_URL
+        self.update_check_button.setEnabled(True)
+        self.update_check_button.setText("Buscar actualizaciones")
         if status == "update":
             self.update_label.setText(f"Actualización disponible: v{latest}")
             self.update_button.setVisible(True)

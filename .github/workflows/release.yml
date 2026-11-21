@@ -44,13 +44,14 @@ jobs:
     - name: Build Win/Mac
       if: runner.os != 'Linux'
       shell: bash
-      run: pyinstaller --noconfirm --onefile --windowed --name "${{ matrix.artifact_name
-        }}" "${{ matrix.entry_script }}"
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then ICON="foid.ico"; else ICON="foid.icns"; fi
+        pyinstaller --noconfirm --onefile --windowed --add-data "foid.png:." --icon "$ICON" --name "${{ matrix.artifact_name }}" "${{ matrix.entry_script }}"
     - name: Build Linux AppImage
       if: runner.os == 'Linux'
       shell: bash
-      run: 'pyinstaller --noconfirm --onedir --windowed --name speakerphone-usb "${{
-        matrix.entry_script }}"
+      run: 'pyinstaller --noconfirm --onedir --windowed --add-data "foid.png:."
+        --name speakerphone-usb "${{ matrix.entry_script }}"
 
         mkdir -p AppDir/usr/bin
 
@@ -59,13 +60,13 @@ jobs:
         printf "[Desktop Entry]\nVersion=1.0\nType=Application\nName=SpeakerPhone-USB\nExec=speakerphone-usb\nIcon=speakerphone-usb\nCategories=AudioVideo;Audio;\nTerminal=false\n"
         > AppDir/speakerphone-usb.desktop
 
-        printf ''<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
-        viewBox="0 0 64 64"><rect x="6" y="6" width="52" height="52" rx="14" fill="#22C55E"/><text
-        x="32" y="40" font-family="sans-serif" font-size="22" font-weight="bold" fill="#FFFFFF"
-        text-anchor="middle">USB</text></svg>'' > AppDir/speakerphone-usb.svg
-        cp AppDir/speakerphone-usb.svg AppDir/.DirIcon
-        mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
-        cp AppDir/speakerphone-usb.svg AppDir/usr/share/icons/hicolor/scalable/apps/speakerphone-usb.svg
+        cp foid.png AppDir/speakerphone-usb.png
+
+        cp foid.png AppDir/.DirIcon
+
+        mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+        cp foid.png AppDir/usr/share/icons/hicolor/256x256/apps/speakerphone-usb.png
 
         printf "#!/bin/bash\nHERE=\$(dirname \$(readlink -f \$0))\nexport PATH=\$HERE/usr/bin:\$PATH\nexport
         LD_LIBRARY_PATH=\$HERE/usr/bin:\$LD_LIBRARY_PATH\nexec \$HERE/usr/bin/speakerphone-usb
@@ -134,10 +135,10 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.17
+          ### Novedades en 0.18
 
-          - **Comprobación de actualizaciones al iniciar (Linux, Windows y macOS):** la app consulta en segundo plano la última release de GitHub y avisa si hay una versión nueva, con un botón **Descargar** que abre la página del release. Si no hay conexión o GitHub no responde, la aplicación sigue funcionando normalmente y lo indica en el log.
-          - **Versión visible en la interfaz:** la versión en ejecución (`v0.17`) aparece en la cabecera de Linux, en la barra de título de Windows/macOS y junto al visor de logs.
-          - **Metadatos de versión compartidos:** nueva constante `APP_VERSION` para los ejecutables de PC, alineada con la versión del APK Android (`v0.17`).
-          - **Versionado:** el release se publica con la etiqueta `0.17`; el CI acepta tanto etiquetas numéricas como el formato anterior `vX.Y.Z`.
+          - **Icono de la aplicación:** se integra `foid.png` como icono de ventana y de bandeja en Linux, Windows y macOS, con un punto de color para el estado de conexión. También se usa como icono del AppImage y del launcher de Android. Los ejecutables de Windows y macOS incorporan `foid.ico` / `foid.icns` como icono del archivo/bundle.
+          - **Botón “Buscar actualizaciones”:** además de la comprobación automática al iniciar, las tres apps de escritorio permiten volver a consultar GitHub manualmente. El botón se deshabilita mientras consulta y, si hay una versión nueva, aparece **Descargar** con el enlace al release.
+          - **Versión visible:** la interfaz muestra `v0.18` en la cabecera/título y junto al visor de logs; el APK Android también muestra `v0.18`.
+          - **Comprobación tolerante a fallos:** si no hay conexión o GitHub no responde, la app sigue funcionando y lo indica en el log.
         files: artifacts/*
