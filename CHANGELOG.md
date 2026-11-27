@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.0
+
+- Interfaz: hoja de estilos compartida con tarjetas, badges, sliders y scrollbars para Linux, Windows y macOS; Linux y Windows usan el mismo nombre y estructura visual.
+- Windows: paridad con Linux con mute (conserva la ganancia), reset a `0.0 dB`, búfer personalizado, copiar/limpiar registro, acciones de silencio en la bandeja y los mismos perfiles de búfer. Linux alinea su rango de ganancia a `±12 dB`.
+- Resiliencia: perfil **Máxima estabilidad** (60 ms en PC, 72 ms en Android); búfer adaptativo en Android que crece ante underruns y se reduce tras 30 s estable; timeouts de envío con reconexión en Linux/Windows/macOS; prioridad alta del hilo de audio en Windows y buffers de socket ampliados.
+- Tests para la hoja de estilos compartida.
+- Versión 0.24.0 en PC y Android.
+
 ## 0.23.2
 
 - Linux y Android: los bloques PCM se redondean a frames completos. Con 44.1 kHz y el perfil de baja latencia se generaban bloques de 1411 bytes y el audio llegaba desalineado (ruido e intercambio de canales).

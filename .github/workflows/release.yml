@@ -173,10 +173,10 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.23.2
+          ### Novedades en 0.24.0
 
-          - **Linux y Android:** los bloques PCM se alinean a frames completos; corrige el ruido y el intercambio de canales con 44.1 kHz y el perfil de baja latencia.
-          - **Android:** el WakeLock y el audio focus se adquieren al iniciar cada sesión y se liberan al terminarla, en lugar de retenerse desde que arranca el servicio.
-          - **Actualizador:** los scripts temporales de Windows y macOS usan nombres aleatorios y exclusivos, fuera de rutas predecibles en `/tmp`.
-          - **Versión visible:** `v0.23.2` en las apps de PC y en Android.
+          - **Interfaz:** diseño compartido para Linux, Windows y macOS con tarjetas, badges, sliders y scrollbars; Windows alcanza la paridad con Linux (mute, reset, búfer personalizado, copiar/limpiar registro y acciones de bandeja).
+          - **Resiliencia:** búfer adaptativo en Android ante underruns, perfil **Máxima estabilidad** (60 ms en PC / 72 ms en Android), timeout de envío con reconexión y prioridad alta del hilo de audio en Windows.
+          - **Audio:** rango de ganancia de Linux unificado a `±12 dB` y buffers de socket ampliados.
+          - **Versión visible:** `v0.24.0` en las apps de PC y en Android.
         files: artifacts/*

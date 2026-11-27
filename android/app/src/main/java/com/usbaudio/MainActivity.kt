@@ -33,7 +33,7 @@ import java.net.URL
 
 class MainActivity : Activity() {
     companion object {
-        const val APP_VERSION = "v0.23.2"
+        const val APP_VERSION = "v0.24.0"
         private const val PREFS_NAME = "usbaudio_prefs"
         private const val KEY_BUFFER_MS = "buffer_ms"
         private const val RELEASES_API =
