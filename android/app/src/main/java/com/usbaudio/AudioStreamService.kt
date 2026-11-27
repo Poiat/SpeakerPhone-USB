@@ -21,6 +21,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import java.io.DataInputStream
 import java.io.IOException
@@ -46,12 +47,17 @@ class AudioStreamService : Service() {
         const val HEADER_SIZE = 11
         const val TRACK_BUFFER_MS = 36  // Perfil "Equilibrado" por defecto
         const val MAX_BACKLOG_MS = 80
+        const val MAX_ADAPTIVE_BUFFER_MS = 120
+        const val ADAPTIVE_STEP_MS = 8
+        const val BUFFER_CHECK_MS = 500L
+        const val BUFFER_STABLE_MS = 30_000L
 
         @Volatile var running = false
         @Volatile var streaming = false
         @Volatile var activeFormat: String? = null
         @Volatile var currentBufferMs: Int = TRACK_BUFFER_MS
         @Volatile var lastUnderruns: Int = 0
+        @Volatile var adaptiveBufferMs: Int = 0
     }
 
     private var worker: Thread? = null
@@ -95,6 +101,7 @@ class AudioStreamService : Service() {
         running = false
         streaming = false
         activeFormat = null
+        adaptiveBufferMs = 0
         try { client?.close() } catch (_: IOException) {}
         try { server?.close() } catch (_: IOException) {}
         worker?.interrupt()
@@ -233,7 +240,7 @@ class AudioStreamService : Service() {
     private fun handle(c: Socket) {
         c.tcpNoDelay = true
         c.soTimeout = 3000
-        c.receiveBufferSize = 16 * 1024
+        c.receiveBufferSize = 32 * 1024
         val din = DataInputStream(c.getInputStream())
         c.getOutputStream().apply { write(82); flush() }
 
@@ -282,6 +289,15 @@ class AudioStreamService : Service() {
             val buf = ByteArray(chunk)
             updateNotification("Reproduciendo · $fmtLabel (${trackBufferMs} ms)")
 
+            val requestedFrames = track.bufferSizeInFrames
+            var bufferFrames = requestedFrames
+            var lastUnderruns = track.underrunCount
+            var lastBufferCheck = SystemClock.elapsedRealtime()
+            var stableSince = lastBufferCheck
+            val maxFrames = rate * maxAdaptiveMs() / 1000
+            val stepFrames = maxOf(1, rate * ADAPTIVE_STEP_MS / 1000)
+            adaptiveBufferMs = bufferFrames * 1000 / rate
+
             track.write(ByteArray(chunk), 0, chunk)
             track.play()
             while (running) {
@@ -301,6 +317,54 @@ class AudioStreamService : Service() {
                     try { din.readFully(buf) } catch (_: SocketTimeoutException) { continue }
                 }
                 if (track.write(buf, 0, chunk, AudioTrack.WRITE_BLOCKING) < 0) break
+
+                // Búfer adaptativo: si el sistema pierde muestras (picos de
+                // CPU, doze, bloqueos breves), se amplía el margen; tras 30 s
+                // sin underruns vuelve poco a poco al perfil elegido.
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastBufferCheck >= BUFFER_CHECK_MS) {
+                    val underruns = track.underrunCount
+                    if (underruns > lastUnderruns) {
+                        stableSince = now
+                        if (bufferFrames < maxFrames) {
+                            val target = minOf(maxFrames, bufferFrames + stepFrames)
+                            val applied = try {
+                                track.setBufferSizeInFrames(target)
+                            } catch (_: Exception) {
+                                -1
+                            }
+                            if (applied > bufferFrames) {
+                                bufferFrames = applied
+                                adaptiveBufferMs = applied * 1000 / rate
+                                updateNotification(
+                                    "Reproduciendo · $fmtLabel · búfer adaptativo " +
+                                        "$adaptiveBufferMs ms"
+                                )
+                            }
+                        }
+                    } else if (
+                        now - stableSince >= BUFFER_STABLE_MS &&
+                        bufferFrames > requestedFrames
+                    ) {
+                        val target = maxOf(requestedFrames, bufferFrames - stepFrames)
+                        val applied = try {
+                            track.setBufferSizeInFrames(target)
+                        } catch (_: Exception) {
+                            -1
+                        }
+                        if (applied > 0 && applied < bufferFrames) {
+                            bufferFrames = applied
+                            adaptiveBufferMs = applied * 1000 / rate
+                            updateNotification(
+                                "Reproduciendo · $fmtLabel · búfer adaptativo " +
+                                    "$adaptiveBufferMs ms"
+                            )
+                        }
+                        stableSince = now
+                    }
+                    lastUnderruns = underruns
+                    lastBufferCheck = now
+                }
             }
         } finally {
             activeTrack?.let { track ->
@@ -308,6 +372,7 @@ class AudioStreamService : Service() {
                 try { track.stop() } catch (_: Exception) {}
                 try { track.release() } catch (_: Exception) {}
             }
+            adaptiveBufferMs = 0
             streaming = false
             activeFormat = null
             broadcastStatus()
@@ -316,6 +381,9 @@ class AudioStreamService : Service() {
             abandonAudioFocus()
         }
     }
+
+    private fun maxAdaptiveMs(): Int =
+        if (trackBufferMs > 24) MAX_ADAPTIVE_BUFFER_MS else trackBufferMs
 
     private fun createTrack(rate: Int, channels: Int): AudioTrack {
         val mask = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
@@ -326,6 +394,15 @@ class AudioStreamService : Service() {
 
         var wantFrames = rate * trackBufferMs / 1000
         wantFrames = ((wantFrames + burst - 1) / burst * burst).coerceAtLeast(burst)
+        // Capacidad para poder crecer sin recrear el AudioTrack. En el perfil
+        // de baja latencia se mantiene el tamaño mínimo para conservar la
+        // ruta rápida de audio.
+        val maxFrames = rate * maxAdaptiveMs() / 1000
+        val capacityBytes = maxOf(
+            minBytes,
+            wantFrames * frameBytes,
+            maxFrames * frameBytes
+        )
         val track = AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -335,7 +412,7 @@ class AudioStreamService : Service() {
                 .setSampleRate(rate).setChannelMask(mask).build())
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            .setBufferSizeInBytes(maxOf(minBytes, wantFrames * frameBytes))
+            .setBufferSizeInBytes(capacityBytes)
             .build()
         track.setBufferSizeInFrames(wantFrames)
         return track

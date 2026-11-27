@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-USB Audio Stream GUI v4
+SpeakerPhone-USB GUI v4
 Transmite el audio del PC (PipeWire/PulseAudio) a Android por cable USB.
 Novedades v4:
 - Mejoras de audio:
@@ -38,6 +38,7 @@ from app_logger import (
 )
 from app_icon import get_icon_path
 from app_settings import load_settings, save_settings
+from app_theme_qt import apply_theme
 from app_version import APP_VERSION
 from audio_capture import pcm_chunk_bytes
 from dsp import process_pcm_s16le
@@ -53,6 +54,8 @@ DEFAULT_CHANNELS = 2
 DEFAULT_CAPTURE_MS = 15
 DEFAULT_CHUNK_MS = 15
 MAX_LOG_LINES = 300
+SEND_TIMEOUT_SECONDS = 5.0
+SOCKET_BUFFER_BYTES = 32768
 
 
 def clean_env():
@@ -876,7 +879,9 @@ class StreamController:
             )
         sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+        sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES
+        )
         with self._lock:
             self._active_sock = sock
 
@@ -887,7 +892,7 @@ class StreamController:
         except socket.timeout:
             raise ConnectionError("La app Android no está escuchando (¿está abierta en el móvil?)")
 
-        sock.settimeout(None)
+        sock.settimeout(SEND_TIMEOUT_SECONDS)
         sock.sendall(pack_header(self.rate, self.channels, self.chunk_ms))
 
         chunk = pcm_chunk_bytes(self.rate, self.channels, self.chunk_ms)
@@ -947,7 +952,13 @@ class StreamController:
                 out_data, lvl, clip = process_pcm_s16le(
                     data, self.gain_linear, self.soft_limiter, need_meter
                 )
-                sendall_fn(out_data)
+                try:
+                    sendall_fn(out_data)
+                except socket.timeout as exc:
+                    raise ConnectionError(
+                        "El móvil dejó de leer audio durante "
+                        f"{SEND_TIMEOUT_SECONDS:.0f} s"
+                    ) from exc
 
                 if need_meter:
                     if clip:
@@ -1071,7 +1082,7 @@ def run_qt_app(qt_binding):
             self._update_window = None
             self._auto_prompted_version = ""
 
-            self.setWindowTitle(f"USB Audio Stream v{APP_VERSION}")
+            self.setWindowTitle(f"SpeakerPhone-USB v{APP_VERSION}")
             self.setWindowIcon(make_tray_icon("#3b82f6"))
             self.setMinimumSize(420, 440)
             self.resize(540, 620)
@@ -1134,7 +1145,7 @@ def run_qt_app(qt_binding):
             root.setSpacing(12)
 
             # Cabecera
-            title = QLabel("USB Audio Stream")
+            title = QLabel("SpeakerPhone-USB")
             title.setObjectName("titleLabel")
             version_label = QLabel(f"v{APP_VERSION}")
             version_label.setObjectName("versionLabel")
@@ -1319,7 +1330,7 @@ def run_qt_app(qt_binding):
             gain_row.setSpacing(8)
             gain_lbl = QLabel("Ganancia:")
             self.gain_slider = QSlider(Qt.Orientation.Horizontal)
-            self.gain_slider.setRange(-120, 60)  # -12.0 dB a +6.0 dB
+            self.gain_slider.setRange(-120, 120)  # -12.0 dB a +12.0 dB
             self.gain_slider.setValue(0)
             self.gain_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.gain_slider.valueChanged.connect(self._on_gain_changed)
@@ -1371,9 +1382,15 @@ def run_qt_app(qt_binding):
             self.profile_combo.addItem("Baja latencia (8 ms)", ("low", 8, 8))
             self.profile_combo.addItem("Equilibrado (15 ms)", ("balanced", 15, 15))
             self.profile_combo.addItem("Alta estabilidad (30 ms)", ("stable", 30, 30))
+            self.profile_combo.addItem(
+                "Máxima estabilidad (60 ms)", ("max_stable", 60, 60)
+            )
             self.profile_combo.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
             self.profile_combo.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
             self.profile_combo.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
+            self.profile_combo.setItemData(
+                3, "Resiste picos de CPU y bloqueos breves", Qt.ItemDataRole.ToolTipRole
+            )
             self.profile_combo.setCurrentIndex(1)
             self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
 
@@ -1465,7 +1482,7 @@ def run_qt_app(qt_binding):
             root.addWidget(self.log_box, 1)
 
         def _apply_accessibility(self):
-            self.setAccessibleName("USB Audio Stream")
+            self.setAccessibleName("SpeakerPhone-USB")
             self.device_label.setAccessibleName("Dispositivo conectado")
             self.status_label.setAccessibleName("Estado de conexión")
             self.level_bar.setAccessibleName("Nivel de señal")
@@ -1501,7 +1518,7 @@ def run_qt_app(qt_binding):
             if not QSystemTrayIcon.isSystemTrayAvailable():
                 return
             self.tray = QSystemTrayIcon(make_tray_icon(self._status_color), self)
-            self.tray.setToolTip(f"USB Audio Stream v{APP_VERSION}")
+            self.tray.setToolTip(f"SpeakerPhone-USB v{APP_VERSION}")
 
             menu = QMenu()
             act_show = QAction("Mostrar / Ocultar ventana", self)
@@ -1513,6 +1530,9 @@ def run_qt_app(qt_binding):
             act_toggle = QAction("Iniciar / Detener", self)
             act_toggle.triggered.connect(self._on_toggle)
 
+            self.tray_mute_action = QAction("Silenciar audio", self)
+            self.tray_mute_action.triggered.connect(self.mute_btn.toggle)
+
             act_quit = QAction("Salir completamente", self)
             act_quit.triggered.connect(self._quit_app)
 
@@ -1520,6 +1540,7 @@ def run_qt_app(qt_binding):
             menu.addSeparator()
             menu.addAction(act_retry)
             menu.addAction(act_toggle)
+            menu.addAction(self.tray_mute_action)
             menu.addSeparator()
             menu.addAction(act_quit)
 
@@ -1691,7 +1712,7 @@ def run_qt_app(qt_binding):
 
             gain_db = settings.get("gain_db")
             if isinstance(gain_db, (int, float)):
-                value = int(round(max(-12.0, min(6.0, float(gain_db))) * 10))
+                value = int(round(max(-12.0, min(12.0, float(gain_db))) * 10))
                 self.gain_slider.setValue(value)
 
             muted = settings.get("muted")
@@ -1785,6 +1806,9 @@ def run_qt_app(qt_binding):
                     "Silenciar la salida sin perder el nivel de ganancia"
                 )
                 self.mute_btn.setAccessibleName("Silenciar salida de audio")
+            action = getattr(self, "tray_mute_action", None)
+            if action is not None:
+                action.setText("Reactivar audio" if muted else "Silenciar audio")
             self._save_settings()
 
         def _on_reset_gain(self):
@@ -1830,7 +1854,7 @@ def run_qt_app(qt_binding):
             self.dot.setStyleSheet(f"color: {self._status_color}; font-size: 15px;")
             self.status_label.setText(text)
             if self.tray:
-                self.tray.setToolTip(f"USB Audio Stream v{APP_VERSION} — {text}")
+                self.tray.setToolTip(f"SpeakerPhone-USB v{APP_VERSION} — {text}")
             self._refresh_tray_icon()
 
         def _ui_rendering(self):
@@ -1939,7 +1963,7 @@ def run_qt_app(qt_binding):
                 event.ignore()
                 self.hide()
                 self.tray.showMessage(
-                    "USB Audio Stream",
+                    "SpeakerPhone-USB",
                     "La aplicación sigue ejecutándose en la bandeja del sistema.",
                     QSystemTrayIcon.MessageIcon.Information,
                     2000,
@@ -1949,173 +1973,7 @@ def run_qt_app(qt_binding):
                 event.accept()
 
         def _apply_style(self):
-            palette = get_theme(self._theme)
-            self.setStyleSheet(Template("""
-                QWidget {
-                    background-color: $bg;
-                    color: $text;
-                    font-family: sans-serif;
-                    font-size: 13px;
-                }
-                QScrollArea {
-                    background-color: $bg;
-                    border: none;
-                }
-                QLabel#titleLabel {
-                    font-size: 18px;
-                    font-weight: bold;
-                    color: $title;
-                }
-                QLabel#versionLabel {
-                    color: $section;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                QLabel#subtitle {
-                    color: $muted;
-                    font-size: 12px;
-                }
-                QFrame#card {
-                    background-color: $panel;
-                    border: 1px solid $border;
-                    border-radius: 10px;
-                }
-                QFrame#sep {
-                    color: $border;
-                }
-                QLabel#sectionLabel {
-                    color: $section;
-                    font-size: 10px;
-                    font-weight: bold;
-                    letter-spacing: 0.6px;
-                }
-                QLabel#valueLabel {
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: $value;
-                }
-                QLabel#clipOk {
-                    background-color: $ok_bg;
-                    color: $ok_fg;
-                    border: 1px solid $ok_border;
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    font-weight: bold;
-                }
-                QLabel#clipAlert {
-                    background-color: $error_bg;
-                    color: $error_fg;
-                    border: 1px solid $error_border;
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    font-weight: bold;
-                }
-                QLabel#hintLabel {
-                    color: $muted;
-                    font-size: 11px;
-                }
-                QLabel#adbOk {
-                    background-color: $ok_bg;
-                    color: $ok_fg;
-                    border: 1px solid $ok_border;
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    font-weight: bold;
-                }
-                QLabel#adbWarn {
-                    background-color: $warn_bg;
-                    color: $warn_fg;
-                    border: 1px solid $warn_border;
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    font-weight: bold;
-                }
-                QLabel#adbError {
-                    background-color: $error_bg;
-                    color: $error_fg;
-                    border: 1px solid $error_border;
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    font-weight: bold;
-                }
-                QLabel#adbNeutral {
-                    background-color: $neutral_bg;
-                    color: $neutral_text;
-                    border: 1px solid $neutral_border;
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    font-weight: bold;
-                }
-                QProgressBar {
-                    background-color: $progress_bg;
-                    border: 1px solid $border;
-                    border-radius: 5px;
-                }
-                QProgressBar#vuNormal::chunk {
-                    background-color: #22c55e;
-                    border-radius: 4px;
-                }
-                QProgressBar#vuClip::chunk {
-                    background-color: #ef4444;
-                    border-radius: 4px;
-                }
-                QComboBox, QSpinBox {
-                    background-color: $input_bg;
-                    border: 1px solid $input_border;
-                    border-radius: 6px;
-                    padding: 5px 8px;
-                    color: $input_text;
-                    font-size: 12px;
-                }
-                QCheckBox {
-                    color: $neutral_text;
-                    spacing: 6px;
-                }
-                QPushButton {
-                    background-color: $button_bg;
-                    border: 1px solid $button_border;
-                    border-radius: 8px;
-                    padding: 8px 14px;
-                    font-weight: 600;
-                    color: $button_text;
-                }
-                QPushButton:hover {
-                    background-color: $button_hover;
-                }
-                QPushButton#primaryBtn {
-                    background-color: $accent;
-                    border: 1px solid $accent_border;
-                    color: #ffffff;
-                }
-                QPushButton#primaryBtn:hover {
-                    background-color: $accent_hover;
-                }
-                QPushButton#miniBtn {
-                    padding: 2px 8px;
-                    font-size: 11px;
-                    border-radius: 5px;
-                }
-                QPushButton#miniBtn:checked {
-                    background-color: $error_bg;
-                    color: $error_fg;
-                    border: 1px solid $error_border;
-                }
-                QPlainTextEdit {
-                    background-color: $log_bg;
-                    border: 1px solid $log_border;
-                    border-radius: 8px;
-                    color: $log_text;
-                    font-family: monospace;
-                    font-size: 11px;
-                    padding: 6px;
-                }
-            """).substitute(palette))
+            apply_theme(self.app, self._theme)
             self._update_theme_button()
 
         def _update_theme_button(self):
@@ -2287,7 +2145,7 @@ def run_tk_app():
     from tkinter import ttk, scrolledtext
 
     root = tk.Tk()
-    root.title(f"USB Audio Stream v{APP_VERSION}")
+    root.title(f"SpeakerPhone-USB v{APP_VERSION}")
     root.geometry("540x600")
     root.minsize(420, 440)
     root.configure(bg="#16181d")
@@ -2306,7 +2164,7 @@ def run_tk_app():
 
     hdr = tk.Frame(root, bg="#16181d")
     hdr.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
-    tk.Label(hdr, text=f"USB Audio Stream v{APP_VERSION}", bg="#16181d", fg="#f3f4f6", font=("Sans", 14, "bold")).pack(anchor="w")
+    tk.Label(hdr, text=f"SpeakerPhone-USB v{APP_VERSION}", bg="#16181d", fg="#f3f4f6", font=("Sans", 14, "bold")).pack(anchor="w")
     tk.Label(hdr, text="Salida de audio de PipeWire hacia Android por cable USB (ADB)", bg="#16181d", fg="#9aa0ae", font=("Sans", 9)).pack(anchor="w")
 
     update_var = tk.StringVar(value="Buscando actualizaciones...")
@@ -2428,6 +2286,7 @@ def run_tk_app():
         "Baja latencia (8 ms)": (8, 8),
         "Equilibrado (15 ms)": (15, 15),
         "Alta estabilidad (30 ms)": (30, 30),
+        "Máxima estabilidad (60 ms)": (60, 60),
     }
     profile_combo = ttk.Combobox(profile_row, state="readonly", values=list(profile_map.keys()))
     profile_combo.current(1)
@@ -2812,7 +2671,7 @@ def run_tk_app():
         save_settings_tk()
 
     tk.Scale(
-        gain_row, from_=-12, to=6, resolution=0.5, orient="horizontal",
+        gain_row, from_=-12, to=12, resolution=0.5, orient="horizontal",
         variable=gain_var, showvalue=True, bg="#1f232b", fg="#f3f4f6",
         highlightthickness=0, command=on_gain_changed
     ).pack(side="left", fill="x", expand=True, padx=8)

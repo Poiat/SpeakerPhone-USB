@@ -21,9 +21,10 @@ Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a
   * Botones de **silencio rápido** (conserva el nivel anterior) y **reset a 0.0 dB**, con el estado de silencio persistido.
   * Medidor de nivel de señal (VU meter) e indicador de saturación (**CLIP**).
   * Ajuste de tamaño de búfer / paquete USB (`ms`) para equilibrar entre latencia mínima y estabilidad.
-* **Perfiles de búfer unificados:** Baja latencia, Equilibrado y Alta estabilidad, con los mismos nombres en PC y Android y valores adaptados a cada plataforma.
-* **Ajustes persistentes:** perfil, salida de audio, frecuencia, ganancia, silencio, limitador, dispositivo y tema se restauran al reiniciar.
-* **Tema claro/oscuro y accesibilidad:** botón para alternar el tema en las tres apps de PC y nombres accesibles para lectores de pantalla.
+* **Perfiles de búfer unificados:** Baja latencia, Equilibrado, Alta estabilidad y Máxima estabilidad (60 ms en PC y 72 ms en Android), con los mismos nombres en PC y Android y valores adaptados a cada plataforma.
+* **Resistencia a picos de CPU:** búfer adaptativo en Android que crece ante underruns y vuelve al perfil tras 30 s estable, timeouts de envío con reconexión en PC y prioridad alta del hilo de audio en Windows.
+* **Ajustes persistentes:** perfil, salida de audio, frecuencia, ganancia, silencio, limitador, dispositivo, búfer y tema se restauran al reiniciar.
+* **Interfaz unificada y accesible:** tarjetas, badges y controles equivalentes en Linux y Windows (mute, reset, búfer personalizado, copiar/limpiar registro y acciones en la bandeja), tema claro/oscuro en las tres apps de PC y nombres accesibles para lectores de pantalla.
 * **Comprobación de actualizaciones:** consulta GitHub Releases al iniciar (y cada 6 h), con botón manual y enlace de descarga.
 * **Bandeja del sistema y reconexión automática:**
   * Minimización a la bandeja del sistema (*System Tray*) con indicador visual de estado por color.
@@ -138,4 +139,4 @@ Sin ellos, el CI publica un APK debug con un aviso. El release incluye `SHA256SU
 - **Sin audio del sistema en Linux:** revisa que PipeWire/PulseAudio esté activo y selecciona el `[Monitor]` de tu salida o el altavoz virtual `Telefono-USB`.
 - **Sin audio del sistema en Windows:** elige `[Sistema / Loopback]`; no requiere cable virtual. Los endpoints 5.1/7.1 se capturan con su formato nativo y se mezclan a estéreo para el móvil. Si el loopback falla, la app no cambia al micrófono: el detalle queda en el registro.
 - **Sin audio del sistema en macOS:** instala `BlackHole 2ch` y selecciónalo como salida de audio.
-- **Cortes o latencia alta:** prueba el perfil **Alta estabilidad** y revisa el indicador de underruns en Android.
+- **Cortes o latencia alta:** prueba **Alta estabilidad** o **Máxima estabilidad** y revisa el indicador de underruns y el búfer adaptativo en Android.

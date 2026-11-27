@@ -42,6 +42,8 @@ DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
 DEFAULT_CHANNELS = 2
 MAX_LOG_LINES = 300
+SEND_TIMEOUT_SECONDS = 5.0
+SOCKET_BUFFER_BYTES = 32768
 
 
 def get_adb_path() -> str:
@@ -273,14 +275,16 @@ class AudioStreamWorker(threading.Thread):
 
                 sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=3.0)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+                sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES
+                )
                 self._sock = sock
 
                 ack = sock.recv(1)
                 if ack != b"R":
                     raise ConnectionError("La app Android no respondio R")
 
-                sock.settimeout(None)
+                sock.settimeout(SEND_TIMEOUT_SECONDS)
                 sock.sendall(pack_header(rate, ch, chunk_ms))
 
                 self._stream = self._pa.open(
@@ -302,7 +306,13 @@ class AudioStreamWorker(threading.Thread):
                 while self.running and not self.force_reconnect and not self.paused:
                     raw_data = self._stream.read(frames, exception_on_overflow=False)
                     out_bytes, lvl, clip = self._process_audio(raw_data)
-                    self._sock.sendall(out_bytes)
+                    try:
+                        self._sock.sendall(out_bytes)
+                    except socket.timeout as exc:
+                        raise ConnectionError(
+                            "El móvil dejó de leer audio durante "
+                            f"{SEND_TIMEOUT_SECONDS:.0f} s; reconectando"
+                        ) from exc
                     now = time.monotonic()
                     if (now - last_ui) >= 0.06:
                         self.signals.level_updated.emit(lvl, clip)
@@ -490,9 +500,11 @@ class MainWindow(QMainWindow):
         self.combo_profile.addItem("Baja latencia (8 ms)", ("low", 8))
         self.combo_profile.addItem("Equilibrado (15 ms)", ("balanced", 15))
         self.combo_profile.addItem("Alta estabilidad (30 ms)", ("stable", 30))
+        self.combo_profile.addItem("Máxima estabilidad (60 ms)", ("max_stable", 60))
         self.combo_profile.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
+        self.combo_profile.setItemData(3, "Resiste picos de CPU y bloqueos breves", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setCurrentIndex(1)
         row_latency.addWidget(self.combo_profile, 1)
         audio_layout.addLayout(row_latency)

@@ -47,6 +47,7 @@ class MainActivity : Activity() {
             BufferProfile(24, "Baja latencia", "Mínima latencia (juegos)"),
             BufferProfile(36, "Equilibrado", "Balance latencia/estabilidad"),
             BufferProfile(48, "Alta estabilidad", "Mayor margen contra cortes USB"),
+            BufferProfile(72, "Máxima estabilidad", "Resiste picos de CPU y bloqueos"),
         )
         private val BUFFER_OPTIONS = BUFFER_PROFILES.map { it.ms }
     }
@@ -239,7 +240,7 @@ class MainActivity : Activity() {
         }
         BUFFER_PROFILES.forEachIndexed { idx, profile ->
             val btn = Button(this).apply {
-                text = "${profile.title}\n${profile.ms} ms"
+                text = "${profile.title.substringBefore(' ')}\n${profile.ms} ms"
                 textSize = 11f
                 isAllCaps = false
                 setTypeface(null, Typeface.BOLD)
@@ -511,7 +512,12 @@ class MainActivity : Activity() {
             val active = AudioStreamService.streaming
             val fmt = AudioStreamService.activeFormat
             val underruns = AudioStreamService.lastUnderruns
-            val activeBuf = if (on) AudioStreamService.currentBufferMs else selectedBufferMs
+            val adaptive = AudioStreamService.adaptiveBufferMs
+            val activeBuf = when {
+                active && adaptive > 0 -> adaptive
+                on -> AudioStreamService.currentBufferMs
+                else -> selectedBufferMs
+            }
 
             deviceValue.text = detectAudioOutput()
             deviceSub.text = when {
@@ -552,6 +558,15 @@ class MainActivity : Activity() {
                 }
             }
             underrunsValue.text = underruns.toString()
+
+            val configured = if (on) AudioStreamService.currentBufferMs else selectedBufferMs
+            val profile = BUFFER_PROFILES.firstOrNull { it.ms == configured }
+            val adaptiveNote = if (active && adaptive > 0) " · activo: $adaptive ms" else ""
+            bufferInfo.text = if (profile != null) {
+                "${profile.title} · ${profile.ms} ms$adaptiveNote · ${profile.description}"
+            } else {
+                "$configured ms$adaptiveNote · Perfil personalizado"
+            }
         }
         update()
         uiHandler.postDelayed({ update() }, 350)

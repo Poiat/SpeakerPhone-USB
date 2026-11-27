@@ -15,7 +15,8 @@ import PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit,
-    QProgressBar, QSystemTrayIcon, QMenu, QGroupBox
+    QProgressBar, QSystemTrayIcon, QMenu, QFrame, QScrollArea,
+    QSpinBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont, QDesktopServices
@@ -50,6 +51,26 @@ DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
 AUDIO_RETRY_SECONDS = 3.0
 MAX_LOG_LINES = 300
+SEND_TIMEOUT_SECONDS = 5.0
+SOCKET_BUFFER_BYTES = 32768
+
+
+class StreamStalled(ConnectionError):
+    """El móvil dejó de leer audio y el socket agotó el tiempo de espera."""
+
+
+def boost_thread_priority():
+    """Eleva la prioridad del hilo de audio en Windows (mejor esfuerzo)."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentThread.restype = ctypes.c_void_p
+        kernel32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        # THREAD_PRIORITY_HIGHEST = 2
+        return bool(kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 2))
+    except Exception:
+        return False
 
 
 def get_adb_path() -> str:
@@ -125,7 +146,9 @@ class AudioStreamWorker(threading.Thread):
         self.device_index = None
         self.chunk_ms = 15
         self.tcp_port = DEFAULT_PORT
+        self.gain_db = 0.0
         self.gain_linear = 1.0
+        self.muted = False
         self.soft_limiter = True
         self._lock = threading.Lock()
         self._sock = None
@@ -146,7 +169,17 @@ class AudioStreamWorker(threading.Thread):
                 self.force_reconnect = True
 
     def set_gain_db(self, db: float):
-        self.gain_linear = math.pow(10.0, db / 20.0)
+        self.gain_db = float(db)
+        self._update_gain_linear()
+
+    def set_muted(self, muted: bool):
+        self.muted = bool(muted)
+        self._update_gain_linear()
+
+    def _update_gain_linear(self):
+        self.gain_linear = (
+            0.0 if self.muted else math.pow(10.0, self.gain_db / 20.0)
+        )
 
     def set_soft_limiter(self, enabled: bool):
         self.soft_limiter = enabled
@@ -275,6 +308,8 @@ class AudioStreamWorker(threading.Thread):
         )
 
     def run(self):
+        if boost_thread_priority():
+            self.signals.log.emit("[Audio] Hilo de audio con prioridad alta")
         last_state = ""
         while self.running:
             if self.paused:
@@ -332,14 +367,16 @@ class AudioStreamWorker(threading.Thread):
 
                 sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=3.0)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+                sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES
+                )
                 self._sock = sock
 
                 ack = sock.recv(1)
                 if ack != b"R":
                     raise ConnectionError("La app Android no respondio R")
 
-                sock.settimeout(None)
+                sock.settimeout(SEND_TIMEOUT_SECONDS)
                 sock.sendall(pack_header(fmt.rate, fmt.send_channels, chunk_ms))
 
                 try:
@@ -405,12 +442,26 @@ class AudioStreamWorker(threading.Thread):
                             raw_data, fmt.capture_channels
                         )
                     out_bytes, lvl, clip = self._process_audio(raw_data)
-                    self._sock.sendall(out_bytes)
+                    try:
+                        self._sock.sendall(out_bytes)
+                    except socket.timeout as exc:
+                        raise StreamStalled(
+                            "El móvil dejó de leer audio durante "
+                            f"{SEND_TIMEOUT_SECONDS:.0f} s; reconectando"
+                        ) from exc
                     now = time.monotonic()
                     if (now - last_ui) >= 0.06:
                         self.signals.level_updated.emit(lvl, clip)
                         last_ui = now
 
+            except StreamStalled as e:
+                self.signals.status_changed.emit(
+                    "Reconectando...", "El móvil no responde", "#F39C12"
+                )
+                self.signals.log.emit(f"[Stream] {e}")
+                self._close_connections()
+                self.signals.level_updated.emit(0.0, False)
+                time.sleep(1.0)
             except (ConnectionRefusedError, ConnectionError, socket.timeout, BrokenPipeError) as e:
                 if last_state != "waiting_app":
                     self.signals.status_changed.emit("Reconectando...", info, "#F39C12")
@@ -502,98 +553,248 @@ class MainWindow(QMainWindow):
 
     def _init_ui(self):
         self.setWindowIcon(self._create_app_icon())
+        self.setMinimumSize(540, 640)
+        self.resize(580, 740)
+
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
 
-        status_group = QGroupBox("Estado de Conexion USB / ADB")
-        status_vbox = QVBoxLayout(status_group)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
 
-        status_layout = QHBoxLayout()
-        self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #E74C3C; font-size: 18px;")
-        self.status_label = QLabel("Iniciando...")
-        self.status_label.setStyleSheet("font-weight: bold; font-size: 13px;")
-        self.device_label = QLabel("Buscando dispositivo...")
-        self.btn_retry = QPushButton("Reintentar")
-        self.btn_toggle = QPushButton("Detener")
-        status_layout.addWidget(self.status_dot)
-        status_layout.addWidget(self.status_label)
-        status_layout.addWidget(self.device_label, 1)
-        status_layout.addWidget(self.btn_retry)
-        status_layout.addWidget(self.btn_toggle)
-        status_vbox.addLayout(status_layout)
+        container = QWidget()
+        scroll.setWidget(container)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
 
-        adb_row = QHBoxLayout()
-        self.adb_badge = QLabel("ADB: comprobando...")
-        self.adb_badge.setStyleSheet("color: #95A5A6; font-weight: bold; font-size: 11px;")
-        self.adb_detail = QLabel("Verificando si adb está instalado y responde...")
-        self.adb_detail.setStyleSheet("color: #7F8C8D; font-size: 11px;")
-        self.adb_detail.setWordWrap(True)
-        self.btn_adb_check = QPushButton("↻")
-        self.btn_adb_check.setFixedWidth(32)
-        self.btn_adb_check.setToolTip("Volver a comprobar si adb está instalado y funciona")
-        adb_row.addWidget(self.adb_badge)
-        adb_row.addWidget(self.adb_detail, 1)
-        adb_row.addWidget(self.btn_adb_check)
-        status_vbox.addLayout(adb_row)
+        # Cabecera
+        title = QLabel("SpeakerPhone-USB")
+        title.setObjectName("titleLabel")
+        self.version_label = QLabel(f"v{APP_VERSION}")
+        self.version_label.setObjectName("versionLabel")
+        self.version_label.setAccessibleName(f"Versión {APP_VERSION}")
+        self.theme_button = QPushButton("☀ Claro")
+        self.theme_button.setObjectName("miniBtn")
+        self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_button.setToolTip("Cambiar entre tema oscuro y claro")
+        self.theme_button.setAccessibleName("Cambiar tema")
+        self.theme_button.clicked.connect(self._toggle_theme)
+        title_row = QHBoxLayout()
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.theme_button)
+        title_row.addWidget(self.version_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        subtitle = QLabel(
+            "Audio del sistema (WASAPI) hacia Android por cable USB (ADB) • "
+            "Reconexión automática"
+        )
+        subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
 
         update_row = QHBoxLayout()
+        update_row.setSpacing(8)
         self.update_label = QLabel("Buscando actualizaciones...")
-        self.update_label.setStyleSheet("color: #7F8C8D; font-size: 11px;")
+        self.update_label.setObjectName("hintLabel")
         self.update_label.setWordWrap(True)
         self.update_check_button = QPushButton("Buscar actualizaciones")
-        self.update_check_button.setToolTip("Volver a comprobar si hay una versión nueva")
+        self.update_check_button.setObjectName("miniBtn")
+        self.update_check_button.setMinimumWidth(150)
+        self.update_check_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_check_button.setToolTip(
+            "Volver a comprobar si hay una versión nueva"
+        )
         self.update_check_button.clicked.connect(self._check_updates)
         self.update_button = QPushButton("Descargar")
+        self.update_button.setObjectName("miniBtn")
+        self.update_button.setMinimumWidth(100)
+        self.update_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_button.setVisible(False)
         self.update_button.clicked.connect(self._open_update_window)
         update_row.addWidget(self.update_label, 1)
         update_row.addWidget(self.update_check_button)
         update_row.addWidget(self.update_button)
-        status_vbox.addLayout(update_row)
 
-        layout.addWidget(status_group)
+        layout.addLayout(title_row)
+        layout.addWidget(subtitle)
+        layout.addLayout(update_row)
 
-        audio_group = QGroupBox("Fuente de Audio, Ganancia y Latencia (WASAPI)")
-        audio_layout = QVBoxLayout(audio_group)
+        # Tarjeta: conexión, ADB y nivel
+        conn_card = QFrame()
+        conn_card.setObjectName("card")
+        conn_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        cc = QVBoxLayout(conn_card)
+        cc.setContentsMargins(14, 12, 14, 12)
+        cc.setSpacing(8)
 
-        row_source = QHBoxLayout()
-        row_source.addWidget(QLabel("Fuente:"))
-        self.combo_devices = QComboBox()
-        self.btn_refresh_dev = QPushButton("↻")
-        self.btn_refresh_dev.setFixedWidth(32)
-        row_source.addWidget(self.combo_devices, 1)
-        row_source.addWidget(self.btn_refresh_dev)
-        audio_layout.addLayout(row_source)
+        dev_title = QLabel("DISPOSITIVO CONECTADO")
+        dev_title.setObjectName("sectionLabel")
+        self.device_label = QLabel("Buscando dispositivo...")
+        self.device_label.setObjectName("valueLabel")
+        self.device_label.setWordWrap(True)
+        cc.addWidget(dev_title)
+        cc.addWidget(self.device_label)
 
-        row_gain = QHBoxLayout()
-        row_gain.addWidget(QLabel("Ganancia:"))
-        self.slider_gain = QSlider(Qt.Horizontal)
-        self.slider_gain.setRange(-120, 120)
-        self.slider_gain.setValue(0)
-        self.label_gain = QLabel("0.0 dB")
-        self.label_gain.setFixedWidth(52)
-        self.chk_limiter = QCheckBox("Limitador suave")
-        self.chk_limiter.setChecked(True)
-        row_gain.addWidget(self.slider_gain, 1)
-        row_gain.addWidget(self.label_gain)
-        row_gain.addWidget(self.chk_limiter)
-        audio_layout.addLayout(row_gain)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setObjectName("sep")
+        cc.addWidget(sep1)
 
-        row_meter = QHBoxLayout()
-        row_meter.addWidget(QLabel("Nivel:"))
+        st_title = QLabel("ESTADO DE CONEXIÓN")
+        st_title.setObjectName("sectionLabel")
+        st_row = QHBoxLayout()
+        st_row.setSpacing(8)
+        self.status_dot = QLabel("●")
+        self.status_dot.setFixedWidth(16)
+        self.status_dot.setStyleSheet("color: #E74C3C; font-size: 15px;")
+        self.status_label = QLabel("Iniciando...")
+        self.status_label.setObjectName("valueLabel")
+        self.status_label.setWordWrap(True)
+        st_row.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        st_row.addWidget(self.status_label, 1)
+        cc.addWidget(st_title)
+        cc.addLayout(st_row)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setObjectName("sep")
+        cc.addWidget(sep2)
+
+        adb_hdr = QHBoxLayout()
+        adb_hdr.setSpacing(8)
+        adb_title = QLabel("ADB (DEPURACIÓN USB)")
+        adb_title.setObjectName("sectionLabel")
+        self.adb_badge = QLabel("ADB: comprobando...")
+        self.adb_badge.setObjectName("adbNeutral")
+        self.btn_adb_check = QPushButton("↻")
+        self.btn_adb_check.setObjectName("miniBtn")
+        self.btn_adb_check.setFixedWidth(30)
+        self.btn_adb_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_adb_check.setToolTip(
+            "Volver a comprobar si adb está instalado y funciona"
+        )
+        self.btn_adb_check.setAccessibleName("Volver a comprobar ADB")
+        adb_hdr.addWidget(adb_title)
+        adb_hdr.addStretch(1)
+        adb_hdr.addWidget(self.adb_badge)
+        adb_hdr.addWidget(self.btn_adb_check)
+        cc.addLayout(adb_hdr)
+
+        self.adb_detail = QLabel("Verificando si adb está instalado y responde...")
+        self.adb_detail.setObjectName("hintLabel")
+        self.adb_detail.setWordWrap(True)
+        cc.addWidget(self.adb_detail)
+
+        lvl_header = QHBoxLayout()
+        lvl_title = QLabel("NIVEL DE SEÑAL Y SATURACIÓN")
+        lvl_title.setObjectName("sectionLabel")
+        self.clip_badge = QLabel("SEÑAL OK")
+        self.clip_badge.setObjectName("clipOk")
+        self.clip_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lvl_header.addWidget(lvl_title)
+        lvl_header.addStretch(1)
+        lvl_header.addWidget(self.clip_badge)
+        cc.addLayout(lvl_header)
+
         self.vu_meter = QProgressBar()
         self.vu_meter.setRange(0, 100)
         self.vu_meter.setTextVisible(False)
-        self.vu_meter.setFixedHeight(14)
-        self.clip_badge = QLabel("CLIP")
-        self.clip_badge.setAlignment(Qt.AlignCenter)
-        self.clip_badge.setFixedWidth(48)
-        self.clip_badge.setStyleSheet("background-color: #2C3E50; color: #7F8C8D; font-weight: bold; border-radius: 4px; padding: 2px;")
-        row_meter.addWidget(self.vu_meter, 1)
-        row_meter.addWidget(self.clip_badge)
-        audio_layout.addLayout(row_meter)
+        self.vu_meter.setFixedHeight(10)
+        self.vu_meter.setObjectName("vuNormal")
+        cc.addWidget(self.vu_meter)
+
+        layout.addWidget(conn_card)
+
+        # Tarjeta: fuente, ganancia y latencia
+        audio_card = QFrame()
+        audio_card.setObjectName("card")
+        audio_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        ac = QVBoxLayout(audio_card)
+        ac.setContentsMargins(14, 12, 14, 12)
+        ac.setSpacing(10)
+
+        src_title = QLabel("FUENTE DE AUDIO Y FRECUENCIA")
+        src_title.setObjectName("sectionLabel")
+        ac.addWidget(src_title)
+
+        src_row = QHBoxLayout()
+        src_row.setSpacing(8)
+        self.combo_devices = QComboBox()
+        self.combo_devices.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.combo_devices.setToolTip(
+            "Salidas del sistema (loopback) y micrófonos WASAPI"
+        )
+        self.btn_refresh_dev = QPushButton("↻")
+        self.btn_refresh_dev.setObjectName("miniBtn")
+        self.btn_refresh_dev.setFixedWidth(36)
+        self.btn_refresh_dev.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh_dev.setToolTip("Actualizar fuentes de audio")
+        self.btn_refresh_dev.setAccessibleName("Actualizar fuentes de audio")
+        src_row.addWidget(self.combo_devices, 1)
+        src_row.addWidget(self.btn_refresh_dev)
+        ac.addLayout(src_row)
+
+        self.source_hint = QLabel(
+            "Loopback: usa el formato nativo del endpoint y no cambia al micrófono."
+        )
+        self.source_hint.setObjectName("hintLabel")
+        self.source_hint.setWordWrap(True)
+        ac.addWidget(self.source_hint)
+
+        gain_row = QHBoxLayout()
+        gain_row.setSpacing(8)
+        gain_row.addWidget(QLabel("Ganancia:"))
+        self.slider_gain = QSlider(Qt.Orientation.Horizontal)
+        self.slider_gain.setRange(-120, 120)
+        self.slider_gain.setValue(0)
+        self.slider_gain.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.label_gain = QLabel("0.0 dB")
+        self.label_gain.setMinimumWidth(52)
+        self.label_gain.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        gain_row.addWidget(self.slider_gain, 1)
+        gain_row.addWidget(self.label_gain)
+        ac.addLayout(gain_row)
+
+        gain_tools = QHBoxLayout()
+        gain_tools.setSpacing(8)
+        self.mute_btn = QPushButton("Silenciar")
+        self.mute_btn.setObjectName("miniBtn")
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mute_btn.setToolTip(
+            "Silenciar la salida sin perder el nivel de ganancia"
+        )
+        self.mute_btn.setAccessibleName("Silenciar salida de audio")
+        self.reset_gain_btn = QPushButton("0.0 dB")
+        self.reset_gain_btn.setObjectName("miniBtn")
+        self.reset_gain_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset_gain_btn.setToolTip("Restablecer la ganancia a 0.0 dB")
+        self.reset_gain_btn.setAccessibleName("Restablecer ganancia a 0.0 dB")
+        self.chk_limiter = QCheckBox("Limitador suave")
+        self.chk_limiter.setChecked(True)
+        self.chk_limiter.setToolTip(
+            "Suaviza picos altos antes de enviarlos para evitar distorsión"
+        )
+        gain_tools.addWidget(self.mute_btn)
+        gain_tools.addWidget(self.reset_gain_btn)
+        gain_tools.addWidget(self.chk_limiter)
+        gain_tools.addStretch(1)
+        ac.addLayout(gain_tools)
 
         row_latency = QHBoxLayout()
         row_latency.addWidget(QLabel("Perfil de búfer:"))
@@ -601,49 +802,118 @@ class MainWindow(QMainWindow):
         self.combo_profile.addItem("Baja latencia (8 ms)", ("low", 8))
         self.combo_profile.addItem("Equilibrado (15 ms)", ("balanced", 15))
         self.combo_profile.addItem("Alta estabilidad (30 ms)", ("stable", 30))
+        self.combo_profile.addItem(
+            "Máxima estabilidad (60 ms)", ("max_stable", 60)
+        )
         self.combo_profile.setItemData(0, "Mínima latencia (juegos)", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setItemData(1, "Balance latencia/estabilidad", Qt.ItemDataRole.ToolTipRole)
         self.combo_profile.setItemData(2, "Mayor margen contra cortes USB", Qt.ItemDataRole.ToolTipRole)
+        self.combo_profile.setItemData(
+            3, "Resiste picos de CPU y bloqueos breves", Qt.ItemDataRole.ToolTipRole
+        )
         self.combo_profile.setCurrentIndex(1)
         row_latency.addWidget(self.combo_profile, 1)
-        audio_layout.addLayout(row_latency)
-        layout.addWidget(audio_group)
+        ac.addLayout(row_latency)
 
-        log_group = QGroupBox("Registros en Vivo")
-        log_layout = QVBoxLayout(log_group)
-        log_header = QHBoxLayout()
-        self.version_label = QLabel(f"v{APP_VERSION}")
-        self.version_label.setStyleSheet("color: #95A5A6; font-size: 11px; font-weight: bold;")
-        self.theme_button = QPushButton("☀ Claro")
-        self.theme_button.setToolTip("Cambiar entre tema oscuro y claro")
-        self.theme_button.setAccessibleName("Cambiar tema")
-        self.theme_button.clicked.connect(self._toggle_theme)
-        btn_open_logs = QPushButton("Abrir carpeta de logs")
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(8)
+        custom_row.addWidget(QLabel("Búfer / paquete:"))
+        self.chunk_spin = QSpinBox()
+        self.chunk_spin.setRange(2, 100)
+        self.chunk_spin.setValue(15)
+        self.chunk_spin.setSuffix(" ms")
+        self.chunk_spin.setToolTip(
+            "Búfer de captura y paquete enviado; más ms resiste mejor los picos de CPU"
+        )
+        self.chunk_spin.setAccessibleName("Búfer en milisegundos")
+        self.apply_buffer_btn = QPushButton("Aplicar")
+        self.apply_buffer_btn.setObjectName("miniBtn")
+        self.apply_buffer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_buffer_btn.setToolTip("Aplicar el búfer personalizado")
+        self.apply_buffer_btn.setAccessibleName("Aplicar búfer personalizado")
+        custom_row.addWidget(self.chunk_spin)
+        custom_row.addWidget(self.apply_buffer_btn)
+        custom_row.addStretch(1)
+        ac.addLayout(custom_row)
+
+        layout.addWidget(audio_card)
+
+        # Botones principales
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self.btn_retry = QPushButton("Reintentar conexión")
+        self.btn_retry.setObjectName("primaryBtn")
+        self.btn_retry.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_retry.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.btn_toggle = QPushButton("Detener")
+        self.btn_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        btn_row.addWidget(self.btn_retry, 2)
+        btn_row.addWidget(self.btn_toggle, 1)
+        layout.addLayout(btn_row)
+
+        # Registro
+        log_hdr = QHBoxLayout()
+        log_lbl = QLabel("LOG EN VIVO")
+        log_lbl.setObjectName("sectionLabel")
+        btn_open_logs = QPushButton("Abrir carpeta")
+        btn_open_logs.setObjectName("miniBtn")
+        btn_open_logs.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_open_logs.setToolTip(get_log_path() or "Carpeta de logs no disponible")
+        btn_open_logs.setAccessibleName("Abrir carpeta de logs")
         btn_open_logs.clicked.connect(self._open_log_folder)
-        log_header.addWidget(self.version_label)
-        log_header.addWidget(self.theme_button)
-        log_header.addStretch(1)
-        log_header.addWidget(btn_open_logs)
-        log_layout.addLayout(log_header)
+        self.copy_log_btn = QPushButton("Copiar")
+        self.copy_log_btn.setObjectName("miniBtn")
+        self.copy_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_log_btn.setToolTip("Copiar el registro visible al portapapeles")
+        self.copy_log_btn.setAccessibleName("Copiar registro")
+        self.clear_log_btn = QPushButton("Limpiar")
+        self.clear_log_btn.setObjectName("miniBtn")
+        self.clear_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_log_btn.setToolTip("Vaciar el registro en vivo")
+        self.clear_log_btn.setAccessibleName("Limpiar registro")
+        log_hdr.addWidget(log_lbl)
+        log_hdr.addStretch(1)
+        log_hdr.addWidget(btn_open_logs)
+        log_hdr.addWidget(self.copy_log_btn)
+        log_hdr.addWidget(self.clear_log_btn)
+        layout.addLayout(log_hdr)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.document().setMaximumBlockCount(MAX_LOG_LINES)
-        self.log_view.setFont(QFont("Consolas", 9))
-        log_layout.addWidget(self.log_view)
-        layout.addWidget(log_group, 1)
+        self.log_view.setMinimumHeight(90)
+        self.log_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.log_view.setPlaceholderText(
+            "Eventos de conexión y audio en tiempo real..."
+        )
+        layout.addWidget(self.log_view, 1)
 
     def _init_tray(self):
         self.tray_icon = QSystemTrayIcon(self._create_app_icon("#E74C3C"), self)
+        self.tray_icon.setToolTip(f"SpeakerPhone-USB v{APP_VERSION}")
         tray_menu = QMenu()
         a_show = QAction("Mostrar / Ocultar", self)
         a_show.triggered.connect(self._toggle_visibility)
+        a_toggle = QAction("Iniciar / Detener", self)
+        a_toggle.triggered.connect(self._on_toggle)
         a_rec = QAction("Reconectar USB", self)
         a_rec.triggered.connect(self.worker.trigger_reconnect)
+        self.tray_mute_action = QAction("Silenciar audio", self)
+        self.tray_mute_action.triggered.connect(self.mute_btn.toggle)
         a_quit = QAction("Salir", self)
         a_quit.triggered.connect(self._quit_app)
         tray_menu.addAction(a_show)
+        tray_menu.addSeparator()
+        tray_menu.addAction(a_toggle)
         tray_menu.addAction(a_rec)
+        tray_menu.addAction(self.tray_mute_action)
         tray_menu.addSeparator()
         tray_menu.addAction(a_quit)
         self.tray_icon.setContextMenu(tray_menu)
@@ -664,6 +934,11 @@ class MainWindow(QMainWindow):
         self.slider_gain.valueChanged.connect(self._on_gain_changed)
         self.chk_limiter.toggled.connect(self._on_limiter_toggled)
         self.combo_profile.currentIndexChanged.connect(self._on_profile_changed)
+        self.mute_btn.toggled.connect(self._on_mute_toggled)
+        self.reset_gain_btn.clicked.connect(self._on_reset_gain)
+        self.apply_buffer_btn.clicked.connect(self._on_apply_buffer)
+        self.copy_log_btn.clicked.connect(self._copy_log)
+        self.clear_log_btn.clicked.connect(self._clear_log)
 
     def _populate_audio_devices(self):
         self.combo_devices.blockSignals(True)
@@ -703,6 +978,10 @@ class MainWindow(QMainWindow):
             value = int(round(max(-12.0, min(12.0, float(gain_db))) * 10))
             self.slider_gain.setValue(value)
 
+        muted = settings.get("muted")
+        if isinstance(muted, bool):
+            self.mute_btn.setChecked(muted)
+
         limiter = settings.get("soft_limiter")
         if isinstance(limiter, bool):
             self.chk_limiter.setChecked(limiter)
@@ -714,6 +993,12 @@ class MainWindow(QMainWindow):
                 if data and data[0] == profile:
                     self.combo_profile.setCurrentIndex(index)
                     break
+
+        chunk_ms = settings.get("chunk_ms")
+        if isinstance(chunk_ms, int):
+            chunk_ms = max(2, min(100, chunk_ms))
+            self.chunk_spin.setValue(chunk_ms)
+            self.worker.set_chunk_ms(chunk_ms)
 
         device_name = settings.get("device_name")
         if device_name:
@@ -728,8 +1013,10 @@ class MainWindow(QMainWindow):
         save_settings(
             {
                 "gain_db": self.slider_gain.value() / 10.0,
+                "muted": self.mute_btn.isChecked(),
                 "soft_limiter": self.chk_limiter.isChecked(),
                 "profile": profile_data[0] if profile_data else "",
+                "chunk_ms": self.chunk_spin.value(),
                 "device_name": self.combo_devices.currentText(),
                 "theme": self._theme,
             }
@@ -764,10 +1051,17 @@ class MainWindow(QMainWindow):
         self.combo_profile.setAccessibleName("Perfil de búfer")
         self.slider_gain.setAccessibleName("Ganancia")
         self.chk_limiter.setAccessibleName("Limitador suave")
+        self.mute_btn.setAccessibleName("Silenciar salida de audio")
+        self.reset_gain_btn.setAccessibleName("Restablecer ganancia a 0.0 dB")
+        self.chunk_spin.setAccessibleName("Búfer en milisegundos")
+        self.apply_buffer_btn.setAccessibleName("Aplicar búfer personalizado")
+        self.btn_refresh_dev.setAccessibleName("Actualizar fuentes de audio")
         self.vu_meter.setAccessibleName("Nivel de señal")
         self.clip_badge.setAccessibleName("Estado de saturación")
         self.btn_retry.setAccessibleName("Reintentar conexión")
         self.btn_toggle.setAccessibleName("Iniciar o detener transmisión")
+        self.copy_log_btn.setAccessibleName("Copiar registro")
+        self.clear_log_btn.setAccessibleName("Limpiar registro")
         self.log_view.setAccessibleName("Registro de eventos")
 
     def _on_device_changed(self, combo_idx: int):
@@ -786,9 +1080,39 @@ class MainWindow(QMainWindow):
         self.worker.set_soft_limiter(enabled)
         self._save_settings()
 
+    def _on_mute_toggled(self, muted: bool):
+        self.worker.set_muted(muted)
+        self._sync_mute_text(muted)
+        self._save_settings()
+
+    def _sync_mute_text(self, muted: bool):
+        if muted:
+            self.mute_btn.setText("Reactivar")
+            self.mute_btn.setToolTip(
+                "Quitar el silencio y volver al nivel de ganancia anterior"
+            )
+            self.mute_btn.setAccessibleName("Reactivar salida de audio")
+        else:
+            self.mute_btn.setText("Silenciar")
+            self.mute_btn.setToolTip(
+                "Silenciar la salida sin perder el nivel de ganancia"
+            )
+            self.mute_btn.setAccessibleName("Silenciar salida de audio")
+        action = getattr(self, "tray_mute_action", None)
+        if action is not None:
+            action.setText("Reactivar audio" if muted else "Silenciar audio")
+
+    def _on_reset_gain(self):
+        self.slider_gain.setValue(0)
+
+    def _on_apply_buffer(self):
+        self.worker.set_chunk_ms(self.chunk_spin.value())
+        self._save_settings()
+
     def _on_profile_changed(self, idx: int):
         data = self.combo_profile.itemData(idx)
         if data:
+            self.chunk_spin.setValue(int(data[1]))
             self.worker.set_chunk_ms(int(data[1]))
             self._save_settings()
 
@@ -808,6 +1132,13 @@ class MainWindow(QMainWindow):
         self.log_view.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
         log(msg)
 
+    def _copy_log(self):
+        QApplication.clipboard().setText(self.log_view.toPlainText())
+        self._append_log("Registro copiado al portapapeles.")
+
+    def _clear_log(self):
+        self.log_view.clear()
+
     def _open_log_folder(self):
         if not open_log_folder():
             self._append_log("No se pudo abrir la carpeta de logs.")
@@ -815,7 +1146,8 @@ class MainWindow(QMainWindow):
     def _refresh_adb_status(self):
         """Lanza la comprobación de ADB en segundo plano para no bloquear la UI."""
         self.adb_badge.setText("ADB: comprobando...")
-        self.adb_badge.setStyleSheet("color: #95A5A6; font-weight: bold; font-size: 11px;")
+        self.adb_badge.setObjectName("adbNeutral")
+        self._repolish(self.adb_badge)
         self.adb_detail.setText("Verificando si adb está instalado y responde...")
         threading.Thread(target=self._adb_check_worker, daemon=True).start()
 
@@ -825,13 +1157,14 @@ class MainWindow(QMainWindow):
 
     def _on_adb_checked(self, state: str, detail: str):
         styles = {
-            "ok": ("ADB OK", "#2ECC71"),
-            "missing": ("ADB NO INSTALADO", "#E74C3C"),
-            "error": ("ADB CON ERROR", "#F39C12"),
+            "ok": ("ADB OK", "adbOk"),
+            "missing": ("ADB NO INSTALADO", "adbError"),
+            "error": ("ADB CON ERROR", "adbWarn"),
         }
-        text, color = styles.get(state, ("ADB: ?", "#95A5A6"))
+        text, object_name = styles.get(state, ("ADB: ?", "adbNeutral"))
         self.adb_badge.setText(text)
-        self.adb_badge.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px;")
+        self.adb_badge.setObjectName(object_name)
+        self._repolish(self.adb_badge)
         self.adb_detail.setText(detail)
         self._append_log(f"[ADB] {detail}")
 
@@ -908,12 +1241,15 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(self._update_url))
 
     def _update_status(self, state: str, device_text: str, color_hex: str):
-        self.status_dot.setStyleSheet(f"color: {color_hex}; font-size: 18px;")
+        self.status_dot.setStyleSheet(f"color: {color_hex}; font-size: 15px;")
         self.status_label.setText(state)
         self.device_label.setText(device_text)
         icon = self._create_app_icon(color_hex)
         self.setWindowIcon(icon)
         self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip(
+            f"SpeakerPhone-USB v{APP_VERSION} — {state}: {device_text}"
+        )
 
     def _ui_rendering(self):
         """True solo si la ventana está visible, restaurada y en primer plano."""
@@ -936,15 +1272,23 @@ class MainWindow(QMainWindow):
             self._badge_state = self._pending_clip
             self._apply_clip_badge()
 
+    @staticmethod
+    def _repolish(widget):
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
     def _apply_clip_badge(self):
-        if self._pending_clip:
-            bg, fg = "#E74C3C", "#FFFFFF"
-        else:
-            bg, fg = "#2C3E50", "#7F8C8D"
-        self.clip_badge.setStyleSheet(
-            f"background-color: {bg}; color: {fg}; font-weight: bold; "
-            "border-radius: 4px; padding: 2px;"
+        self.clip_badge.setText(
+            "SATURACIÓN (CLIP)" if self._pending_clip else "SEÑAL OK"
         )
+        self.clip_badge.setObjectName(
+            "clipAlert" if self._pending_clip else "clipOk"
+        )
+        self.vu_meter.setObjectName(
+            "vuClip" if self._pending_clip else "vuNormal"
+        )
+        self._repolish(self.clip_badge)
+        self._repolish(self.vu_meter)
 
     def _refresh_rendered_ui(self):
         if self._ui_rendering():
