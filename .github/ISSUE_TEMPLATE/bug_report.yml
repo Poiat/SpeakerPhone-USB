@@ -1,0 +1,70 @@
+name: Reporte de fallo
+description: Algo no funciona como debería
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportar. No incluyas tokens, seriales completos ni logs con datos personales.
+  - type: input
+    id: version
+    attributes:
+      label: Versión
+      description: La que aparece en la UI (por ejemplo v0.20) o el tag del release.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Plataforma
+      options:
+        - Linux (AppImage)
+        - Linux (código fuente)
+        - Windows (.exe)
+        - macOS (.app)
+        - Android (APK)
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Método de instalación
+      options:
+        - Release oficial (GitHub Releases)
+        - Compilado localmente
+        - Código fuente
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducir
+      placeholder: |
+        1. Abro la app...
+        2. Conecto el móvil...
+        3. Selecciono el perfil...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Comportamiento esperado
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Comportamiento actual
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs relevantes
+      description: Pega solo las líneas relevantes de `speakerphone.log` o del log en vivo.
+      render: text
+  - type: input
+    id: audio
+    attributes:
+      label: Backend/dispositivo de audio
+      placeholder: PipeWire, WASAPI loopback, BlackHole, USB, Bluetooth...

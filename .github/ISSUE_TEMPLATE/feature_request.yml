@@ -1,0 +1,43 @@
+name: Propuesta de mejora
+description: Una idea o funcionalidad nueva
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema o necesidad
+      description: ¿Qué situación quieres resolver?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Propuesta
+      description: ¿Cómo imaginas la solución?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área
+      options:
+        - Audio/DSP
+        - Conexión ADB/protocolo
+        - Actualizaciones
+        - UI/UX
+        - Android
+        - Distribución/CI
+        - Documentación
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibilidad
+      options:
+        - label: Este cambio requeriría actualizar PC y Android a la vez.
+        - label: Este cambio requiere una nueva dependencia.

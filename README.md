@@ -1,5 +1,9 @@
 # SpeakerPhone-USB
 
+[![CI](https://github.com/Poiat/SpeakerPhone-USB/actions/workflows/ci.yml/badge.svg)](https://github.com/Poiat/SpeakerPhone-USB/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Poiat/SpeakerPhone-USB)](https://github.com/Poiat/SpeakerPhone-USB/releases)
+[![License: MIT](https://img.shields.io/github/license/Poiat/SpeakerPhone-USB)](LICENSE)
+
 Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a través de un cable USB (mediante el túnel TCP de **ADB**), permitiendo usar los altavoces o audífonos conectados al móvil como salida de audio de baja latencia sin depender de Bluetooth ni Wi-Fi.
 
 ---
@@ -17,7 +21,8 @@ Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a
   * Medidor de nivel de señal (VU meter) e indicador de saturación (**CLIP**).
   * Ajuste de tamaño de búfer / paquete USB (`ms`) para equilibrar entre latencia mínima y estabilidad.
 * **Perfiles de búfer unificados:** Baja latencia, Equilibrado y Alta estabilidad, con los mismos nombres en PC y Android y valores adaptados a cada plataforma.
-* **Ajustes persistentes:** perfil, fuente de audio, frecuencia, ganancia, limitador y dispositivo se restauran al reiniciar.
+* **Ajustes persistentes:** perfil, fuente de audio, frecuencia, ganancia, limitador, dispositivo y tema se restauran al reiniciar.
+* **Tema claro/oscuro y accesibilidad:** botón para alternar el tema en las tres apps de PC y nombres accesibles para lectores de pantalla.
 * **Comprobación de actualizaciones:** consulta GitHub Releases al iniciar (y cada 6 h), con botón manual y enlace de descarga.
 * **Bandeja del sistema y reconexión automática:**
   * Minimización a la bandeja del sistema (*System Tray*) con indicador visual de estado por color.
@@ -77,8 +82,17 @@ Para ejecutar las pruebas y el lint:
 pip install -r requirements-dev.txt
 python scripts/check_version.py
 python -m pytest -q
-ruff check --select E9,F app_settings.py app_icon.py app_version.py dsp.py protocol.py update_checker.py scripts tests
+ruff check --select E9,F app_settings.py app_icon.py app_version.py dsp.py \
+  protocol.py update_checker.py updater.py update_window_qt.py theme.py \
+  app_theme_qt.py scripts tests
 ```
+
+Las dependencias están **fijadas por versión** para builds reproducibles
+(`requirements.txt`, `requirements-dev.txt`, `requirements-build.txt`).
+Dependabot propone actualizaciones semanales, `pip-audit` audita el árbol
+completo en CI y cada release publica un `sbom.json`. Consulta
+[CONTRIBUTING.md](CONTRIBUTING.md) para el flujo de release y
+[SECURITY.md](SECURITY.md) para reportar vulnerabilidades.
 
 ---
 

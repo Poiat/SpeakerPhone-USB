@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Problema de seguridad
+    url: https://github.com/Poiat/SpeakerPhone-USB/security/advisories/new
+    about: No publiques vulnerabilidades como issues; usa un aviso privado.
+  - name: Releases
+    url: https://github.com/Poiat/SpeakerPhone-USB/releases
+    about: Descarga la última versión y revisa las notas.
