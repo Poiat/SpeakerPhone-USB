@@ -173,12 +173,10 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.23.1
+          ### Novedades en 0.23.2
 
-          - **Windows:** captura WASAPI Loopback con el formato nativo del endpoint (incluye 5.1/7.1, mezclado a estéreo para el móvil) y sin fallback automático al micrófono.
-          - **Windows:** los fallos de audio muestran hostapi, canales, frecuencia nativa y parámetros exactos del stream.
-          - **Linux:** selector de salidas con descripción legible e identificador interno; solo monitores y `Telefono-USB`, nunca micrófonos.
-          - **Linux:** mute con nivel conservado, reset a `0.0 dB` y estado persistido.
-          - **Linux:** stderr real de `parec`, agrupación de reintentos idénticos y botón Copiar en el registro.
-          - **Versión visible:** `v0.23.1` en las apps de PC y en Android.
+          - **Linux y Android:** los bloques PCM se alinean a frames completos; corrige el ruido y el intercambio de canales con 44.1 kHz y el perfil de baja latencia.
+          - **Android:** el WakeLock y el audio focus se adquieren al iniciar cada sesión y se liberan al terminarla, en lugar de retenerse desde que arranca el servicio.
+          - **Actualizador:** los scripts temporales de Windows y macOS usan nombres aleatorios y exclusivos, fuera de rutas predecibles en `/tmp`.
+          - **Versión visible:** `v0.23.2` en las apps de PC y en Android.
         files: artifacts/*

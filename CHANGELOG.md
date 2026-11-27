@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.2
+
+- Linux y Android: los bloques PCM se redondean a frames completos. Con 44.1 kHz y el perfil de baja latencia se generaban bloques de 1411 bytes y el audio llegaba desalineado (ruido e intercambio de canales).
+- Android: el WakeLock y el audio focus se adquieren al iniciar cada sesión y se liberan al terminarla; ya no se retienen desde que arranca el servicio sin PC conectado.
+- Actualizador: los scripts temporales de Windows y macOS usan nombres/carpetas aleatorias y exclusivas en lugar de una ruta predecible en el directorio temporal.
+- Tests de regresión para la alineación PCM y para las rutas temporales del actualizador.
+- Versión 0.23.2 en PC y Android.
+
 ## 0.23.1
 
 - Windows: los dispositivos `[Loopback]` se abren con los canales y la frecuencia nativos de WASAPI; los endpoints 5.1/7.1 se mezclan a estéreo para el protocolo Android. Corrige `Invalid number of channels` al transmitir el audio del escritorio.
