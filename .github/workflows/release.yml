@@ -173,12 +173,11 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.22.1
+          ### Novedades en 0.23.0
 
-          - **Actualizador:** elimina el paquete temporal tras aplicar la actualización. Antes quedaban ~90 MB por actualización en `/tmp` (RAM en sistemas con tmpfs).
-          - **Windows/macOS:** el registro en pantalla se limita a 300 líneas para evitar crecimiento indefinido.
-          - **Linux:** el watcher de suspensión/bloqueo se reinicia correctamente y no duplica procesos `gdbus`.
-          - **Linux (fallback Tk):** corregido un `NameError` al mostrar errores de actualización.
-          - **CI:** ruff revisa también los entrypoints de Linux, Windows y macOS.
-          - **Versión visible:** `v0.22.1` en las apps de PC y en Android.
+          - **Rendimiento de la UI:** el medidor VU y el badge CLIP dejan de repintarse cuando la ventana no está visible, restaurada y en primer plano. Al volver se refrescan con el último estado; la bandeja sigue indicando CLIP.
+          - **Windows/macOS:** el estilo del badge CLIP solo se actualiza cuando cambia el estado, no en cada lectura del medidor.
+          - **Linux:** la ventana se restaura correctamente desde la bandeja (`showNormal`).
+          - **Ventana de actualización:** respeta el tema claro/oscuro y añade nombres accesibles.
+          - **Versión visible:** `v0.23.0` en las apps de PC y en Android.
         files: artifacts/*

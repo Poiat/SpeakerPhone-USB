@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.0
+
+- La UI deja de repintar el medidor VU y el badge CLIP cuando la ventana no está visible, restaurada y en primer plano; al volver se refresca con el último estado.
+- Windows/macOS: el estilo del badge CLIP solo se aplica cuando cambia el estado, no en cada lectura del medidor.
+- Linux: la ventana se restaura correctamente desde la bandeja con `showNormal()`.
+- Ventana de actualización con tema claro/oscuro y nombres accesibles.
+- Versión 0.23.0 en PC y Android.
+
 ## 0.22.1
 
 - Actualizador: elimina el paquete temporal tras aplicar la actualización; antes quedaban ~90 MB por actualización en `/tmp` (RAM en sistemas con tmpfs).
