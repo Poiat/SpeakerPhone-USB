@@ -41,6 +41,7 @@ from updater import can_self_update
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
 DEFAULT_CHANNELS = 2
+MAX_LOG_LINES = 300
 
 
 def get_adb_path() -> str:
@@ -513,6 +514,7 @@ class MainWindow(QMainWindow):
         log_layout.addLayout(log_header)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.document().setMaximumBlockCount(MAX_LOG_LINES)
         self.log_view.setFont(QFont("Menlo", 10))
         log_layout.addWidget(self.log_view)
         layout.addWidget(log_group, 1)
