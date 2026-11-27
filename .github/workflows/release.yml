@@ -37,7 +37,7 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install portaudio
     - name: Deps Python
-      run: python -m pip install --upgrade pip && pip install pyinstaller -r requirements.txt
+      run: python -m pip install --upgrade pip && pip install -r requirements-build.txt -r requirements.txt
     - name: Verificar version de PySide6
       run: |
         python -c "import sys, PySide6; v=tuple(map(int, PySide6.__version__.split('.')[:2])); print('PySide6', PySide6.__version__, '| Python', sys.version.split()[0]); assert not (v >= (6, 12) and sys.version_info < (3, 12)), 'PySide6 >= 6.12 con Python < 3.12 causa bool_dealloc en Signal.emit()'"
@@ -158,6 +158,10 @@ jobs:
       with:
         path: artifacts
         merge-multiple: true
+    - name: Generar SBOM
+      run: |
+        python -m pip install --quiet cyclonedx-bom==9.0.0
+        cyclonedx-py requirements -o artifacts/sbom.json requirements.txt
     - name: Generar checksums SHA-256
       run: |
         cd artifacts
@@ -168,14 +172,12 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.20
+          ### Novedades en 0.22
 
-          - **Actualización en vivo (Linux, Windows y macOS):** al detectar una versión nueva se abre una ventana con barra de progreso, se descarga el paquete de la plataforma y se verifica su SHA-256 contra `SHA256SUMS.txt`. Si todo es correcto, la actualización se aplica y la app se reinicia:
-            - **Linux/AppImage:** reemplaza el AppImage en uso y lo relanza.
-            - **Windows:** un helper reemplaza el `.exe` al cerrar y lo vuelve a abrir.
-            - **macOS:** reemplaza el bundle `.app` y lo relanza.
-          - La descarga puede cancelarse. Si la app no está empaquetada o no puede reemplazarse, se conserva el paquete descargado y se ofrece la carpeta para instalarlo manualmente.
-          - **Actualización manual en Android:** botón **Buscar actualizaciones** que consulta GitHub y abre la descarga del APK.
-          - **Nota:** los usuarios de 0.19 deben instalar 0.20 una vez manualmente; a partir de 0.20 las siguientes versiones se actualizan desde la propia app.
-          - **Versión visible:** `v0.20` en las apps de PC y en Android.
+          - **Tema claro/oscuro (Linux, Windows y macOS):** botón en la cabecera para alternar el tema; la preferencia se guarda y se restaura al reiniciar.
+          - **Accesibilidad:** nombres accesibles en los controles principales para lectores de pantalla en las tres apps de PC.
+          - **Windows:** los errores de audio quedan aislados con fallback y los logs se escriben en UTF-8.
+          - **Repositorio:** licencia MIT, guía de contribución, política de seguridad, Dependabot, plantillas de issues/PR y badges en el README.
+          - **Cadena de suministro:** dependencias fijadas por versión, `pip-audit` en CI y `sbom.json` publicado con cada release.
+          - **Versión visible:** `v0.22` en las apps de PC y en Android.
         files: artifacts/*

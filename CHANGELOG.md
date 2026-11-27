@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22
+
+- Tema claro/oscuro seleccionable en las tres apps de PC, persistente entre sesiones.
+- Nombres accesibles (`AccessibleName`) en los controles principales de Linux, Windows y macOS para lectores de pantalla.
+- Windows: errores de audio aislados con fallback y logs forzados a UTF-8.
+- Dependencias fijadas por versión para builds reproducibles; `pip-audit` en CI y SBOM (`cyclonedx`) en CI y releases.
+- Licencia MIT, guía de contribución, política de seguridad, Dependabot y plantillas de issues/PR.
+- Badges de CI, release y licencia en el README.
+- Versión 0.22 en PC y Android.
+
 ## 0.20
 
 - Actualización en vivo en PC: ventana con barra de progreso, descarga automática, verificación SHA-256 y aplicación/relanzamiento en Linux, Windows y macOS.

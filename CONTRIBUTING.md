@@ -35,7 +35,7 @@ python -m pip check
 2. Actualiza `CHANGELOG.md` y las notas del release en
    `.github/workflows/release.yml`.
 3. Ejecuta `python scripts/check_version.py <tag>`.
-4. Crea un tag numérico (por ejemplo `0.21`) y súbelo. El workflow construye
+4. Crea un tag numérico (por ejemplo `0.22`) y súbelo. El workflow construye
    los binarios, el SBOM y los checksums, y publica el release.
 
 Los cambios de protocolo (`protocol.py` y `AudioStreamService.kt`) deben
