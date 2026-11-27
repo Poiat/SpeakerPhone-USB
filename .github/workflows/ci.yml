@@ -22,7 +22,7 @@ jobs:
       - name: Tests
         run: python -m pytest -q
       - name: Ruff
-        run: ruff check --select E9,F app_settings.py app_icon.py app_version.py dsp.py protocol.py update_checker.py updater.py update_window_qt.py theme.py app_theme_qt.py speakerphone_linux.py speakerphone_win.py speakerphone_mac.py scripts tests
+        run: ruff check --select E9,F app_settings.py app_icon.py app_version.py audio_capture.py dsp.py protocol.py update_checker.py updater.py update_window_qt.py theme.py app_theme_qt.py speakerphone_linux.py speakerphone_win.py speakerphone_mac.py scripts tests
       - name: Generar SBOM
         run: cyclonedx-py requirements -o sbom.json requirements.txt
       - uses: actions/upload-artifact@v4

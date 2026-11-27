@@ -32,6 +32,11 @@ from app_icon import get_icon_path
 from app_settings import load_settings, save_settings
 from app_theme_qt import apply_theme
 from app_version import APP_VERSION
+from audio_capture import (
+    CaptureFormatError,
+    downmix_to_stereo,
+    resolve_capture_format,
+)
 from dsp import process_pcm_s16le
 from protocol import pack_header
 from update_checker import RELEASES_URL, check_for_update
@@ -43,7 +48,7 @@ CREATE_NO_WINDOW = 0x08000000
 os.environ.setdefault("ANDROID_ADB_SERVER_PORT", "5038")
 DEFAULT_PORT = 5000
 DEFAULT_RATE = 48000
-DEFAULT_CHANNELS = 2
+AUDIO_RETRY_SECONDS = 3.0
 MAX_LOG_LINES = 300
 
 
@@ -125,6 +130,7 @@ class AudioStreamWorker(threading.Thread):
         self._lock = threading.Lock()
         self._sock = None
         self._stream = None
+        self._last_audio_error = None
         self._pa = pyaudio.PyAudio()
 
     def set_device(self, device_index: int):
@@ -232,6 +238,42 @@ class AudioStreamWorker(threading.Thread):
         )
         return out_bytes, level * 100.0, clipping
 
+    def _log_audio_open_error(self, dev_idx, dev_info, chunk_ms, error, fmt=None):
+        """Registra el contexto completo de un fallo al abrir el dispositivo."""
+        hostapi_idx = dev_info.get("hostApi", "?")
+        try:
+            hostapi_name = self._pa.get_host_api_info_by_index(hostapi_idx)["name"]
+        except Exception:
+            hostapi_name = "desconocida"
+        is_loopback = bool(dev_info.get("isLoopbackDevice", False))
+
+        self.signals.log.emit(
+            f"[Audio] Fallo al abrir el dispositivo (índice {dev_idx}): "
+            f"{dev_info.get('name', 'sin nombre')}"
+        )
+        self.signals.log.emit(
+            f"[Audio]   hostapi={hostapi_name} (idx {hostapi_idx}) | "
+            f"maxInputChannels={dev_info.get('maxInputChannels')} | "
+            f"maxOutputChannels={dev_info.get('maxOutputChannels')} | "
+            f"defaultSampleRate={dev_info.get('defaultSampleRate')} | "
+            f"isLoopback={is_loopback}"
+        )
+        if fmt is not None:
+            self.signals.log.emit(
+                f"[Audio]   stream solicitado: format=paInt16 | "
+                f"channels={fmt.capture_channels} | rate={fmt.rate} | "
+                f"frames_per_buffer={fmt.frames_per_buffer} | chunk_ms={chunk_ms}"
+            )
+        else:
+            self.signals.log.emit(
+                "[Audio]   no se abrió el stream: formato de captura inválido"
+            )
+        self.signals.log.emit(f"[Audio]   error: {error}")
+        self.signals.log.emit(
+            "[Audio]   no se probará otra fuente automáticamente; "
+            f"reintento en {AUDIO_RETRY_SECONDS:.1f} s"
+        )
+
     def run(self):
         last_state = ""
         while self.running:
@@ -271,9 +313,22 @@ class AudioStreamWorker(threading.Thread):
 
             try:
                 dev_info = self._pa.get_device_info_by_index(dev_idx)
-                rate = int(dev_info.get("defaultSampleRate", DEFAULT_RATE))
-                ch = max(1, min(2, int(dev_info.get("maxInputChannels", DEFAULT_CHANNELS))))
-                frames = max(128, int(rate * chunk_ms / 1000))
+                try:
+                    fmt = resolve_capture_format(dev_info, chunk_ms, DEFAULT_RATE)
+                except CaptureFormatError as fmt_err:
+                    error_key = ("formato", dev_idx, str(fmt_err))
+                    if self._last_audio_error != error_key:
+                        self._last_audio_error = error_key
+                        self._log_audio_open_error(dev_idx, dev_info, chunk_ms, fmt_err)
+                        self.signals.status_changed.emit(
+                            "Error de audio",
+                            f"{dev_info.get('name', 'Fuente no válida')} (ver registro)",
+                            "#E74C3C",
+                        )
+                    last_state = f"audio_error_{dev_idx}_{chunk_ms}"
+                    self.signals.level_updated.emit(0.0, False)
+                    time.sleep(AUDIO_RETRY_SECONDS)
+                    continue
 
                 sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=3.0)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -285,51 +340,70 @@ class AudioStreamWorker(threading.Thread):
                     raise ConnectionError("La app Android no respondio R")
 
                 sock.settimeout(None)
-                sock.sendall(pack_header(rate, ch, chunk_ms))
+                sock.sendall(pack_header(fmt.rate, fmt.send_channels, chunk_ms))
 
                 try:
                     self._stream = self._pa.open(
                         format=pyaudio.paInt16,
-                        channels=ch,
-                        rate=rate,
+                        channels=fmt.capture_channels,
+                        rate=fmt.rate,
                         input=True,
                         input_device_index=dev_idx,
-                        frames_per_buffer=frames
+                        frames_per_buffer=fmt.frames_per_buffer,
                     )
                 except OSError as audio_err:
-                    fallback_idx = None
-                    for idx in range(self._pa.get_device_count()):
-                        info_d = self._pa.get_device_info_by_index(idx)
-                        if int(info_d.get("maxInputChannels", 0)) > 0 and idx != dev_idx:
-                            fallback_idx = idx
-                            break
-                    if fallback_idx is not None:
-                        self.signals.log.emit(f"[Audio] Fallo {dev_idx} ({dev_info.get('name')}): {audio_err}. Probando {fallback_idx}...")
-                        dev_idx = fallback_idx
-                        dev_info = self._pa.get_device_info_by_index(dev_idx)
-                        rate = int(dev_info.get("defaultSampleRate", DEFAULT_RATE))
-                        ch = max(1, min(2, int(dev_info.get("maxInputChannels", DEFAULT_CHANNELS))))
-                        frames = max(128, int(rate * chunk_ms / 1000))
-                        self._stream = self._pa.open(
-                            format=pyaudio.paInt16,
-                            channels=ch,
-                            rate=rate,
-                            input=True,
-                            input_device_index=dev_idx,
-                            frames_per_buffer=frames
+                    # Sin fallback: si falla la fuente elegida (p. ej. un
+                    # [Loopback]) no se transmite el micrófono por sorpresa.
+                    error_key = (
+                        "apertura",
+                        dev_idx,
+                        fmt.rate,
+                        fmt.capture_channels,
+                        fmt.send_channels,
+                        chunk_ms,
+                        str(audio_err),
+                    )
+                    if self._last_audio_error != error_key:
+                        self._last_audio_error = error_key
+                        self._log_audio_open_error(
+                            dev_idx, dev_info, chunk_ms, audio_err, fmt
                         )
-                    else:
-                        raise
+                        self.signals.status_changed.emit(
+                            "Error de audio",
+                            f"{dev_info.get('name', 'Dispositivo')} (ver registro)",
+                            "#E74C3C",
+                        )
+                    last_state = f"audio_error_{dev_idx}_{chunk_ms}"
+                    self._close_connections()
+                    self.signals.level_updated.emit(0.0, False)
+                    time.sleep(AUDIO_RETRY_SECONDS)
+                    continue
+
+                self._last_audio_error = None
 
                 dev_title = dev_info["name"]
-                self.signals.status_changed.emit("Transmitiendo", f"{info} ({rate} Hz)", "#2ECC71")
+                self.signals.status_changed.emit("Transmitiendo", f"{info} ({fmt.rate} Hz)", "#2ECC71")
                 if last_state != f"streaming_{info}_{dev_idx}_{chunk_ms}":
-                    self.signals.log.emit(f"[Audio] Transmitiendo {dev_title} ({rate}Hz, {ch}ch, {chunk_ms}ms) -> tcp:{self.tcp_port}")
+                    channel_note = (
+                        f"{fmt.capture_channels}ch→{fmt.send_channels}ch"
+                        if fmt.capture_channels != fmt.send_channels
+                        else f"{fmt.send_channels}ch"
+                    )
+                    self.signals.log.emit(
+                        f"[Audio] Transmitiendo {dev_title} "
+                        f"({fmt.rate}Hz, {channel_note}, {chunk_ms}ms) -> tcp:{self.tcp_port}"
+                    )
                     last_state = f"streaming_{info}_{dev_idx}_{chunk_ms}"
 
                 last_ui = 0.0
                 while self.running and not self.force_reconnect and not self.paused:
-                    raw_data = self._stream.read(frames, exception_on_overflow=False)
+                    raw_data = self._stream.read(
+                        fmt.frames_per_buffer, exception_on_overflow=False
+                    )
+                    if fmt.capture_channels != fmt.send_channels:
+                        raw_data = downmix_to_stereo(
+                            raw_data, fmt.capture_channels
+                        )
                     out_bytes, lvl, clip = self._process_audio(raw_data)
                     self._sock.sendall(out_bytes)
                     now = time.monotonic()
