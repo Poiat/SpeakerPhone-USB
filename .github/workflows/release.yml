@@ -173,11 +173,12 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.23.0
+          ### Novedades en 0.23.1
 
-          - **Rendimiento de la UI:** el medidor VU y el badge CLIP dejan de repintarse cuando la ventana no está visible, restaurada y en primer plano. Al volver se refrescan con el último estado; la bandeja sigue indicando CLIP.
-          - **Windows/macOS:** el estilo del badge CLIP solo se actualiza cuando cambia el estado, no en cada lectura del medidor.
-          - **Linux:** la ventana se restaura correctamente desde la bandeja (`showNormal`).
-          - **Ventana de actualización:** respeta el tema claro/oscuro y añade nombres accesibles.
-          - **Versión visible:** `v0.23.0` en las apps de PC y en Android.
+          - **Windows:** captura WASAPI Loopback con el formato nativo del endpoint (incluye 5.1/7.1, mezclado a estéreo para el móvil) y sin fallback automático al micrófono.
+          - **Windows:** los fallos de audio muestran hostapi, canales, frecuencia nativa y parámetros exactos del stream.
+          - **Linux:** selector de salidas con descripción legible e identificador interno; solo monitores y `Telefono-USB`, nunca micrófonos.
+          - **Linux:** mute con nivel conservado, reset a `0.0 dB` y estado persistido.
+          - **Linux:** stderr real de `parec`, agrupación de reintentos idénticos y botón Copiar en el registro.
+          - **Versión visible:** `v0.23.1` en las apps de PC y en Android.
         files: artifacts/*

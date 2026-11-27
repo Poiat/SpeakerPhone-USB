@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.23.1
+
+- Windows: los dispositivos `[Loopback]` se abren con los canales y la frecuencia nativos de WASAPI; los endpoints 5.1/7.1 se mezclan a estéreo para el protocolo Android. Corrige `Invalid number of channels` al transmitir el audio del escritorio.
+- Windows: si la salida elegida falla, ya no se cambia automáticamente al micrófono; se avisa en el registro y se reintenta la misma fuente.
+- Windows: los fallos de apertura registran índice, nombre, hostapi, canales de entrada/salida, frecuencia nativa y parámetros exactos del stream.
+- Linux: el selector solo muestra salidas de audio (monitores de PipeWire/PulseAudio y altavoz virtual `Telefono-USB`), con descripción legible e identificador interno.
+- Linux: antes de abrir `parec` se valida que la fuente sea un monitor, evitando que caiga al micrófono predeterminado si la salida desaparece.
+- Linux: botones de silencio rápido (conserva el nivel anterior) y reset a `0.0 dB`, con el estado persistido.
+- Linux: el registro muestra el stderr real de `parec`, agrupa mensajes idénticos consecutivos con `(×N)` y añade botón Copiar.
+- Versión 0.23.1 en PC y Android.
+
 ## 0.23.0
 
 - La UI deja de repintar el medidor VU y el badge CLIP cuando la ventana no está visible, restaurada y en primer plano; al volver se refresca con el último estado.
