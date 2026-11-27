@@ -11,17 +11,18 @@ Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a
 ## Características principales
 
 * **Multiplataforma:** Ejecutables portátiles independientes para **Linux (x86_64)**, **Windows (x86_64)** y **macOS (Apple Silicon arm64)**.
-* **Captura de audio nativa por sistema:**
-  * **Linux:** Integración directa con **PipeWire / PulseAudio** (detección de frecuencia nativa y creación de sink virtual `Telefono-USB`).
-  * **Windows:** Captura **WASAPI Loopback** mediante `PyAudioWPatch` (graba el audio del sistema sin cables virtuales adicionales).
-  * **macOS:** Captura mediante **CoreAudio** (compatible con micrófonos y dispositivos virtuales como *BlackHole 2ch*).
+* **Salida de audio nativa por sistema:**
+  * **Linux:** Integración directa con **PipeWire / PulseAudio** (detección de frecuencia nativa y altavoz virtual `Telefono-USB`).
+  * **Windows:** **WASAPI Loopback** mediante `PyAudioWPatch` (toma el audio del sistema sin cables virtuales adicionales).
+  * **macOS:** **CoreAudio** (compatible con altavoces y dispositivos virtuales como *BlackHole 2ch*).
 * **Control de señal en tiempo real:**
-  * Selector de dispositivo/fuente de entrada con actualización dinámica.
+  * Selector de **salida de audio** (monitores del sistema y altavoz virtual `Telefono-USB`) con descripción legible e identificador interno; nunca lista micrófonos.
   * Ajuste de **ganancia en dB** (`-12 dB` a `+12 dB`) con **limitador suave (`tanh`)** para prevenir distorsión.
+  * Botones de **silencio rápido** (conserva el nivel anterior) y **reset a 0.0 dB**, con el estado de silencio persistido.
   * Medidor de nivel de señal (VU meter) e indicador de saturación (**CLIP**).
   * Ajuste de tamaño de búfer / paquete USB (`ms`) para equilibrar entre latencia mínima y estabilidad.
 * **Perfiles de búfer unificados:** Baja latencia, Equilibrado y Alta estabilidad, con los mismos nombres en PC y Android y valores adaptados a cada plataforma.
-* **Ajustes persistentes:** perfil, fuente de audio, frecuencia, ganancia, limitador, dispositivo y tema se restauran al reiniciar.
+* **Ajustes persistentes:** perfil, salida de audio, frecuencia, ganancia, silencio, limitador, dispositivo y tema se restauran al reiniciar.
 * **Tema claro/oscuro y accesibilidad:** botón para alternar el tema en las tres apps de PC y nombres accesibles para lectores de pantalla.
 * **Comprobación de actualizaciones:** consulta GitHub Releases al iniciar (y cada 6 h), con botón manual y enlace de descarga.
 * **Bandeja del sistema y reconexión automática:**
@@ -62,7 +63,7 @@ Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a
      chmod +x SpeakerPhone-USB-Linux-x86_64
      ./SpeakerPhone-USB-Linux-x86_64
      ```
-5. Selecciona la fuente de audio deseada (por ejemplo `[Sistema / Loopback]` en Windows o `BlackHole 2ch` en macOS) y ajusta la ganancia o latencia según tus preferencias.
+5. Selecciona la salida de audio deseada (por ejemplo el monitor de tu altavoz o `Telefono-USB` en Linux, `[Sistema / Loopback]` en Windows o `BlackHole 2ch` en macOS) y ajusta la ganancia o latencia según tus preferencias.
 
 ---
 
@@ -134,7 +135,7 @@ Sin ellos, el CI publica un APK debug con un aviso. El release incluye `SHA256SU
 
 - **`bool_dealloc` / SIGABRT en Linux:** requiere PySide6 6.11.2; 6.12.0 tiene una regresión de refcount en `Signal.emit()`. El CI verifica la versión.
 - **No aparece el dispositivo:** comprueba `adb devices`, acepta la huella de depuración USB y, si hay varios móviles, desconecta los que no uses (se prioriza el que está listo).
-- **Sin audio del sistema en Linux:** revisa que PipeWire/PulseAudio esté activo y selecciona `[Monitor]` como fuente.
-- **Sin audio del sistema en Windows:** elige `[Sistema / Loopback]`; no requiere cable virtual.
-- **Sin audio del sistema en macOS:** instala `BlackHole 2ch` y selecciónalo como fuente.
+- **Sin audio del sistema en Linux:** revisa que PipeWire/PulseAudio esté activo y selecciona el `[Monitor]` de tu salida o el altavoz virtual `Telefono-USB`.
+- **Sin audio del sistema en Windows:** elige `[Sistema / Loopback]`; no requiere cable virtual. Los endpoints 5.1/7.1 se capturan con su formato nativo y se mezclan a estéreo para el móvil. Si el loopback falla, la app no cambia al micrófono: el detalle queda en el registro.
+- **Sin audio del sistema en macOS:** instala `BlackHole 2ch` y selecciónalo como salida de audio.
 - **Cortes o latencia alta:** prueba el perfil **Alta estabilidad** y revisa el indicador de underruns en Android.

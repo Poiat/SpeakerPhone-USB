@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -153,25 +154,189 @@ def detect_pipewire_native_rate():
     return DEFAULT_RATE
 
 
+VIRTUAL_SINK_NAME = "usb_phone"
+
+
+def parse_pactl_sinks(text):
+    """Extrae nombre, descripción y monitor de cada bloque de `pactl list sinks`."""
+    sinks = []
+    current = None
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Sink #"):
+            if current is not None:
+                sinks.append(current)
+            current = {"name": "", "description": "", "monitor": ""}
+            continue
+        if current is None or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        value = value.strip()
+        if key == "Name":
+            current["name"] = value
+        elif key == "Description":
+            current["description"] = value
+        elif key == "Monitor Source":
+            current["monitor"] = value
+    if current is not None:
+        sinks.append(current)
+    return sinks
+
+
+def _sink_monitor(sink):
+    monitor = (sink.get("monitor") or "").strip()
+    if monitor:
+        return monitor
+    name = (sink.get("name") or "").strip()
+    return f"{name}.monitor" if name else ""
+
+
+def build_audio_sources(sinks, default_sink="", fallback_monitors=()):
+    """
+    Construye la lista (id, etiqueta) de salidas para el selector.
+
+    La app solo envía audio de salida hacia Android, así que nunca se listan
+    micrófonos ni fuentes de entrada: únicamente el monitor automático, el
+    altavoz virtual Telefono-USB y los monitores de los sinks existentes.
+    """
+    default_sink = (default_sink or "").strip()
+    sinks = [sink for sink in (sinks or []) if sink.get("name")]
+    default_info = next(
+        (sink for sink in sinks if sink.get("name") == default_sink), None
+    )
+
+    options = []
+    if default_info is not None:
+        default_monitor = _sink_monitor(default_info)
+        default_desc = default_info.get("description") or default_monitor
+        if default_monitor:
+            options.append((
+                "__default__",
+                f"[Sistema] Salida predeterminada — {default_desc} ({default_monitor})",
+            ))
+    if not options:
+        options.append((
+            "__default__",
+            "[Sistema] Salida predeterminada del sistema (monitor automático)",
+        ))
+    options.append((
+        "__virtual__",
+        "[Virtual] Telefono-USB (usb_phone) — altavoz virtual; silencia el PC",
+    ))
+
+    monitors = []
+    seen = set()
+    for sink in sinks:
+        name = (sink.get("name") or "").strip()
+        if name == VIRTUAL_SINK_NAME:
+            continue
+        monitor = _sink_monitor(sink)
+        if not monitor or monitor in seen:
+            continue
+        seen.add(monitor)
+        description = (sink.get("description") or name).strip()
+        is_default = name == default_sink
+        tag = "[Predeterminada]" if is_default else "[Monitor]"
+        monitors.append((
+            not is_default,
+            description.casefold(),
+            f"{tag} {description} — {monitor}",
+            monitor,
+        ))
+    for _not_default, _description, label, monitor in sorted(monitors):
+        options.append((monitor, label))
+
+    for monitor in fallback_monitors:
+        monitor = (monitor or "").strip()
+        if not monitor or not monitor.endswith(".monitor"):
+            continue
+        if monitor == f"{VIRTUAL_SINK_NAME}.monitor" or monitor in seen:
+            continue
+        seen.add(monitor)
+        options.append((monitor, f"[Monitor] {monitor}"))
+    return options
+
+
 def list_audio_sources():
-    """Devuelve lista de tuplas (id_fuente, etiqueta_legible) disponibles en PipeWire/PulseAudio."""
-    options = [
-        ("__default__", "Salida por defecto del sistema (monitor automático)"),
-        ("__virtual__", "Sink virtual 'Telefono-USB' (silenciar PC)"),
-    ]
+    """Devuelve (id, etiqueta) de las salidas/monitores disponibles."""
+    try:
+        default_sink = run_cmd(["pactl", "get-default-sink"], timeout=2)
+    except Exception:
+        default_sink = ""
+
+    try:
+        sinks = parse_pactl_sinks(run_cmd(["pactl", "list", "sinks"], timeout=3))
+    except Exception:
+        sinks = []
+
+    fallback_monitors = []
+    if not sinks:
+        try:
+            out = run_cmd(["pactl", "list", "short", "sources"], timeout=3)
+            for line in out.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    fallback_monitors.append(parts[1].strip())
+        except Exception:
+            pass
+
+    return build_audio_sources(sinks, default_sink, fallback_monitors)
+
+
+def is_monitor_source(name):
+    """True si `name` es el monitor de una salida (nunca una entrada/micrófono)."""
+    if name == "@DEFAULT_MONITOR@":
+        return True
+    name = (name or "").strip()
+    if not name:
+        return False
+    try:
+        sinks = parse_pactl_sinks(run_cmd(["pactl", "list", "sinks"], timeout=3))
+    except Exception:
+        sinks = []
+    if sinks:
+        return any(_sink_monitor(sink) == name for sink in sinks)
+    # Si no se pudieron leer los sinks, solo se acepta el nombre convencional.
     try:
         out = run_cmd(["pactl", "list", "short", "sources"], timeout=3)
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                name = parts[1].strip()
-                if name == "usb_phone.monitor":
-                    continue
-                tag = "Monitor" if name.endswith(".monitor") else "Entrada"
-                options.append((name, f"[{tag}] {name}"))
     except Exception:
-        pass
-    return options
+        return False
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[1].strip() == name:
+            return name.endswith(".monitor")
+    return False
+
+
+def format_parec_error(returncode, stderr_text):
+    """Resume el stderr real de parec para mostrarlo en el registro."""
+    details = []
+    if returncode not in (None, 0):
+        details.append(f"código de salida {returncode}")
+    lines = [line.strip() for line in (stderr_text or "").splitlines() if line.strip()]
+    if lines:
+        details.append(" | ".join(lines))
+    return f" ({'; '.join(details)})" if details else ""
+
+
+class LogRepeatCounter:
+    """Detecta mensajes idénticos consecutivos para agruparlos en el log en vivo."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.message = None
+        self.count = 0
+
+    def register(self, message):
+        """Devuelve (es_repeticion, veces_consecutivas) para el mensaje dado."""
+        if message == self.message:
+            self.count += 1
+            return True, self.count
+        self.message = message
+        self.count = 1
+        return False, self.count
 
 
 def query_adb_device():
@@ -326,8 +491,10 @@ class StreamController:
         self.capture_ms = DEFAULT_CAPTURE_MS
         self.chunk_ms = DEFAULT_CHUNK_MS
         self.source_mode = "__default__"
+        self.source_label = "Salida predeterminada del sistema"
 
         self.gain_db = 0.0
+        self.muted = False
         self.gain_linear = 1.0
         self.soft_limiter = True
 
@@ -388,7 +555,7 @@ class StreamController:
                 except Exception:
                     pass
         if released:
-            self.on_log("Sink virtual huérfano 'usb_phone' liberado.")
+            self.on_log("Altavoz virtual huérfano 'usb_phone' liberado.")
 
         try:
             if run_cmd(["pactl", "get-default-sink"], timeout=2) == "usb_phone":
@@ -397,7 +564,9 @@ class StreamController:
                     parts = line.split("\t")
                     if len(parts) >= 2 and parts[1].strip() != "usb_phone":
                         run_cmd(["pactl", "set-default-sink", parts[1].strip()], timeout=2)
-                        self.on_log(f"Sink por defecto restaurado a '{parts[1].strip()}'.")
+                        self.on_log(
+                            f"Salida predeterminada restaurada a '{parts[1].strip()}'."
+                        )
                         break
         except Exception:
             pass
@@ -429,8 +598,8 @@ class StreamController:
         self._cleanup_virtual_sink()
         self._remove_adb_forward()
         self.on_level(0.0, 0)
-        self.on_status("stopped", "Desconectado (transmisión detenida)")
-        self.on_log("Transmisión detenida.")
+        self.on_status("stopped", "Desconectado (envío detenido)")
+        self.on_log("Envío de audio detenido.")
 
     def _handle_sleep_state(self, is_sleeping):
         self._suspended = is_sleeping
@@ -462,7 +631,26 @@ class StreamController:
 
     def set_gain_db(self, db):
         self.gain_db = max(-12.0, min(6.0, float(db)))
-        self.gain_linear = math.pow(10.0, self.gain_db / 20.0)
+        self._update_gain_linear()
+
+    def _update_gain_linear(self):
+        # Al silenciar se conserva gain_db para restaurar el nivel al reactivar.
+        self.gain_linear = (
+            0.0 if self.muted else math.pow(10.0, self.gain_db / 20.0)
+        )
+
+    def set_muted(self, muted):
+        muted = bool(muted)
+        if self.muted == muted:
+            return
+        self.muted = muted
+        self._update_gain_linear()
+        if muted:
+            self.on_log(
+                f"Salida silenciada (se conserva {self.gain_db:+.1f} dB)."
+            )
+        else:
+            self.on_log(f"Salida reactivada a {self.gain_db:+.1f} dB.")
 
     def set_soft_limiter(self, enabled):
         self.soft_limiter = bool(enabled)
@@ -480,11 +668,12 @@ class StreamController:
         if self._running:
             self.retry_now()
 
-    def set_source_mode(self, mode):
+    def set_source_mode(self, mode, label=None):
+        self.source_label = label or mode
         if self.source_mode == mode:
             return
         self.source_mode = mode
-        self.on_log(f"Fuente seleccionada: {mode}")
+        self.on_log(f"Salida seleccionada: {self.source_label}")
         if self._running:
             self.retry_now()
 
@@ -495,7 +684,7 @@ class StreamController:
             return
         self.capture_ms = capture_ms
         self.chunk_ms = chunk_ms
-        self.on_log(f"Latencia ajustada: captura={capture_ms} ms, paquete={chunk_ms} ms")
+        self.on_log(f"Latencia ajustada: búfer={capture_ms} ms, paquete={chunk_ms} ms")
         if self._running:
             self.retry_now()
 
@@ -538,7 +727,10 @@ class StreamController:
         run_cmd(["pactl", "set-default-sink", "usb_phone"])
         self._prev_sink = prev
         self._null_module = mod
-        self.on_log(f"Sink virtual 'Telefono-USB' creado (anterior: {prev}).")
+        self.on_log(
+            f"Altavoz virtual 'Telefono-USB' activo; el PC queda en silencio "
+            f"(salida anterior: {prev})."
+        )
         return "usb_phone.monitor"
 
     def _cleanup_virtual_sink(self):
@@ -569,7 +761,9 @@ class StreamController:
         if self.source_mode == "__virtual__":
             return self._setup_virtual_sink()
         if self.source_mode == "__default__":
-            return run_cmd(["pactl", "get-default-sink"]) + ".monitor"
+            # El servidor resuelve el monitor del sink predeterminado; nunca
+            # cae al micrófono si el sink cambia entre reintentos.
+            return "@DEFAULT_MONITOR@"
         return self.source_mode
 
     def _device_poll_loop(self):
@@ -644,6 +838,10 @@ class StreamController:
                     break
                 if self._suspended:
                     continue
+                if self._retry_event.is_set():
+                    # La reconexión la pidió la UI (cambio de salida, perfil,
+                    # frecuencia o reanudación): no es un fallo real.
+                    continue
                 msg = str(e).strip() or e.__class__.__name__
                 self.on_status("retrying", f"Reintentando conexión ({msg})")
                 self.on_log(f"[reintento] {msg}")
@@ -653,7 +851,28 @@ class StreamController:
     def _wait_or_retry(self, seconds):
         self._retry_event.wait(timeout=seconds)
 
+    @staticmethod
+    def _parec_error_suffix(cap, stderr_file):
+        """Recupera el código de salida y el stderr real de parec."""
+        try:
+            returncode = cap.poll()
+        except Exception:
+            returncode = None
+        try:
+            stderr_file.seek(0)
+            text = stderr_file.read().decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        return format_parec_error(returncode, text)
+
     def _stream_audio(self, source):
+        if not is_monitor_source(source):
+            # parec cae a la fuente predeterminada (p. ej. el micrófono) si el
+            # dispositivo no existe; se corta antes de abrir parec.
+            raise ConnectionError(
+                f"La salida '{source}' no está disponible como monitor; "
+                "no se inicia para no enviar el micrófono"
+            )
         sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
@@ -671,30 +890,40 @@ class StreamController:
         sock.sendall(pack_header(self.rate, self.channels, self.chunk_ms))
 
         chunk = self.channels * 2 * self.rate * self.chunk_ms // 1000
-        cap = subprocess.Popen(
-            [
-                "parec",
-                "--device", source,
-                "--format=s16le",
-                f"--rate={self.rate}",
-                f"--channels={self.channels}",
-                f"--latency-msec={self.capture_ms}",
-                "--client-name=usb-audio-stream",
-                "--stream-name=usb-audio",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0,
-            env=clean_env(),
-        )
+        stderr_file = tempfile.TemporaryFile(mode="w+b")
+        try:
+            cap = subprocess.Popen(
+                [
+                    "parec",
+                    "--device", source,
+                    "--format=s16le",
+                    f"--rate={self.rate}",
+                    f"--channels={self.channels}",
+                    f"--latency-msec={self.capture_ms}",
+                    "--client-name=usb-audio-stream",
+                    "--stream-name=usb-audio",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                bufsize=0,
+                env=clean_env(),
+            )
+        except Exception:
+            stderr_file.close()
+            raise
         with self._lock:
             self._active_proc = cap
 
         self.on_status(
             "streaming",
-            f"Transmitiendo ({self.rate} Hz • {self.capture_ms}/{self.chunk_ms} ms)"
+            f"Enviando audio ({self.rate} Hz • {self.capture_ms}/{self.chunk_ms} ms)"
         )
-        self.on_log(f"Transmitiendo '{source}' a {self.rate} Hz -> tcp:{self.port}")
+        source_desc = self.source_label or source
+        if source != "@DEFAULT_MONITOR@" and source not in source_desc:
+            source_desc = f"{source_desc} ({source})"
+        self.on_log(
+            f"Enviando salida '{source_desc}' a {self.rate} Hz -> tcp:{self.port}"
+        )
 
         last_ui_push = 0.0
         clip_hold_until = 0.0
@@ -707,7 +936,10 @@ class StreamController:
             while self._running and not self._stop_event.is_set() and not self._suspended:
                 data = read_fn(fd, chunk)
                 if not data:
-                    raise ConnectionError("parec finalizó la captura")
+                    raise ConnectionError(
+                        "parec finalizó la lectura de la salida"
+                        + self._parec_error_suffix(cap, stderr_file)
+                    )
 
                 now = mono_fn()
                 need_meter = (now - last_ui_push) >= 0.06
@@ -724,13 +956,20 @@ class StreamController:
         finally:
             self._abort_active_io()
             self._cleanup_virtual_sink()
+            for handle in (cap.stdout, stderr_file):
+                try:
+                    handle.close()
+                except Exception:
+                    pass
             self.on_level(0.0, 0)
 
 
 def run_qt_app(qt_binding):
     if qt_binding == "PySide6":
         from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer, QEvent
-        from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
+        from PySide6.QtGui import (
+            QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices, QTextCursor
+        )
         from PySide6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
@@ -739,7 +978,9 @@ def run_qt_app(qt_binding):
         )
     else:
         from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl, QTimer, QEvent
-        from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
+        from PyQt6.QtGui import (
+            QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices, QTextCursor
+        )
         from PyQt6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
@@ -821,6 +1062,7 @@ def run_qt_app(qt_binding):
             self._is_clipping = False
             self._badge_state = None
             self._pending_level = 0.0
+            self._log_counter = LogRepeatCounter()
             self._update_url = RELEASES_URL
             self._settings_ready = False
             self._theme = valid_theme(load_settings().get("theme", "dark"))
@@ -908,7 +1150,7 @@ def run_qt_app(qt_binding):
             title_row.addWidget(self.theme_btn)
             title_row.addWidget(version_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
-            subtitle = QLabel("Audio de PipeWire hacia Android por cable USB (ADB) • Reconexión automática")
+            subtitle = QLabel("Salida de audio de PipeWire hacia Android por cable USB (ADB) • Reconexión automática")
             subtitle.setObjectName("subtitle")
             subtitle.setWordWrap(True)
 
@@ -1019,7 +1261,7 @@ def run_qt_app(qt_binding):
 
             root.addWidget(main_card)
 
-            # Tarjeta 2: Audio (Fuente, Frecuencia, Ganancia, Limitador y Latencia)
+            # Tarjeta 2: Salida de audio (fuente, frecuencia, ganancia y latencia)
             cfg_card = QFrame()
             cfg_card.setObjectName("card")
             cfg_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -1027,7 +1269,7 @@ def run_qt_app(qt_binding):
             cc.setContentsMargins(14, 12, 14, 12)
             cc.setSpacing(10)
 
-            src_title = QLabel("FUENTE DE AUDIO Y FRECUENCIA")
+            src_title = QLabel("SALIDA DE AUDIO Y FRECUENCIA")
             src_title.setObjectName("sectionLabel")
             cc.addWidget(src_title)
 
@@ -1036,11 +1278,18 @@ def run_qt_app(qt_binding):
             self.source_combo = QComboBox()
             self.source_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.source_combo.setMinimumWidth(140)
+            self.source_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.source_combo.setMinimumContentsLength(22)
+            self.source_combo.setToolTip(
+                "Salidas de audio del PC (monitores y altavoz virtual); nunca micrófonos"
+            )
             self.source_combo.currentIndexChanged.connect(self._on_source_changed)
 
             self.refresh_src_btn = QPushButton("↻")
             self.refresh_src_btn.setFixedWidth(36)
-            self.refresh_src_btn.setToolTip("Actualizar fuentes de audio")
+            self.refresh_src_btn.setToolTip("Actualizar salidas de audio")
             self.refresh_src_btn.clicked.connect(self._refresh_sources)
 
             self.rate_combo = QComboBox()
@@ -1056,7 +1305,15 @@ def run_qt_app(qt_binding):
             src_row.addWidget(self.rate_combo)
             cc.addLayout(src_row)
 
-            # Ganancia + Limitador suave
+            self.source_id_label = QLabel("")
+            self.source_id_label.setObjectName("hintLabel")
+            self.source_id_label.setWordWrap(True)
+            self.source_id_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            cc.addWidget(self.source_id_label)
+
+            # Ganancia, silencio rápido y reset
             gain_row = QHBoxLayout()
             gain_row.setSpacing(8)
             gain_lbl = QLabel("Ganancia:")
@@ -1070,16 +1327,38 @@ def run_qt_app(qt_binding):
             self.gain_val_lbl.setMinimumWidth(52)
             self.gain_val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
+            gain_row.addWidget(gain_lbl)
+            gain_row.addWidget(self.gain_slider, 1)
+            gain_row.addWidget(self.gain_val_lbl)
+            cc.addLayout(gain_row)
+
+            gain_tools = QHBoxLayout()
+            gain_tools.setSpacing(8)
+            self.mute_btn = QPushButton("Silenciar")
+            self.mute_btn.setObjectName("miniBtn")
+            self.mute_btn.setCheckable(True)
+            self.mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.mute_btn.setToolTip("Silenciar la salida sin perder el nivel de ganancia")
+            self.mute_btn.setAccessibleName("Silenciar salida de audio")
+            self.mute_btn.toggled.connect(self._on_mute_toggled)
+
+            self.reset_gain_btn = QPushButton("0.0 dB")
+            self.reset_gain_btn.setObjectName("miniBtn")
+            self.reset_gain_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.reset_gain_btn.setToolTip("Restablecer la ganancia a 0.0 dB")
+            self.reset_gain_btn.setAccessibleName("Restablecer ganancia a 0.0 dB")
+            self.reset_gain_btn.clicked.connect(self._on_reset_gain)
+
             self.limiter_cb = QCheckBox("Limitador suave")
             self.limiter_cb.setChecked(True)
             self.limiter_cb.setToolTip("Suaviza picos altos antes de enviarlos para evitar distorsión")
             self.limiter_cb.toggled.connect(self._on_limiter_toggled)
 
-            gain_row.addWidget(gain_lbl)
-            gain_row.addWidget(self.gain_slider, 1)
-            gain_row.addWidget(self.gain_val_lbl)
-            gain_row.addWidget(self.limiter_cb)
-            cc.addLayout(gain_row)
+            gain_tools.addWidget(self.mute_btn)
+            gain_tools.addWidget(self.reset_gain_btn)
+            gain_tools.addWidget(self.limiter_cb)
+            gain_tools.addStretch(1)
+            cc.addLayout(gain_tools)
 
             # Perfiles rápidos de latencia + ajuste fino adaptable
             lat_grid = QGridLayout()
@@ -1097,17 +1376,19 @@ def run_qt_app(qt_binding):
             self.profile_combo.setCurrentIndex(1)
             self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
 
-            cap_lbl = QLabel("Captura:")
+            cap_lbl = QLabel("Búfer:")
             self.cap_spin = QSpinBox()
             self.cap_spin.setRange(2, 100)
             self.cap_spin.setValue(DEFAULT_CAPTURE_MS)
             self.cap_spin.setSuffix(" ms")
+            self.cap_spin.setToolTip("Búfer de lectura de la salida antes de enviarla")
 
             chk_lbl = QLabel("Paquete:")
             self.chk_spin = QSpinBox()
             self.chk_spin.setRange(2, 100)
             self.chk_spin.setValue(DEFAULT_CHUNK_MS)
             self.chk_spin.setSuffix(" ms")
+            self.chk_spin.setToolTip("Tamaño del paquete de audio enviado por USB")
 
             self.apply_lat_btn = QPushButton("Aplicar")
             self.apply_lat_btn.clicked.connect(self._on_apply_latency)
@@ -1155,14 +1436,23 @@ def run_qt_app(qt_binding):
             open_logs_btn.setToolTip(get_log_path() or "Carpeta de logs no disponible")
             open_logs_btn.setAccessibleName("Abrir carpeta de logs")
             open_logs_btn.clicked.connect(self._open_logs)
-            clear_log_btn = QPushButton("Limpiar")
-            clear_log_btn.setObjectName("miniBtn")
-            clear_log_btn.setAccessibleName("Limpiar registro")
-            clear_log_btn.clicked.connect(lambda: self.log_box.clear())
+            self.copy_log_btn = QPushButton("Copiar")
+            self.copy_log_btn.setObjectName("miniBtn")
+            self.copy_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.copy_log_btn.setToolTip("Copiar el registro visible al portapapeles")
+            self.copy_log_btn.setAccessibleName("Copiar registro")
+            self.copy_log_btn.clicked.connect(self._copy_log)
+            self.clear_log_btn = QPushButton("Limpiar")
+            self.clear_log_btn.setObjectName("miniBtn")
+            self.clear_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.clear_log_btn.setToolTip("Vaciar el registro en vivo")
+            self.clear_log_btn.setAccessibleName("Limpiar registro")
+            self.clear_log_btn.clicked.connect(self._clear_log)
             log_hdr.addWidget(log_lbl)
             log_hdr.addStretch(1)
             log_hdr.addWidget(open_logs_btn)
-            log_hdr.addWidget(clear_log_btn)
+            log_hdr.addWidget(self.copy_log_btn)
+            log_hdr.addWidget(self.clear_log_btn)
             root.addLayout(log_hdr)
 
             self.log_box = QPlainTextEdit()
@@ -1184,18 +1474,25 @@ def run_qt_app(qt_binding):
             self.update_label.setAccessibleName("Estado de actualizaciones")
             self.update_btn.setAccessibleName("Actualizar aplicación")
             self.update_check_btn.setAccessibleName("Buscar actualizaciones")
-            self.source_combo.setAccessibleName("Fuente de audio")
+            self.source_combo.setAccessibleName("Salida de audio a enviar")
+            self.source_id_label.setAccessibleName(
+                "Identificador interno de la salida seleccionada"
+            )
             self.rate_combo.setAccessibleName("Frecuencia de muestreo")
-            self.refresh_src_btn.setAccessibleName("Actualizar fuentes de audio")
+            self.refresh_src_btn.setAccessibleName("Actualizar salidas de audio")
             self.profile_combo.setAccessibleName("Perfil de búfer")
-            self.gain_slider.setAccessibleName("Ganancia")
+            self.gain_slider.setAccessibleName("Ganancia de la salida")
             self.gain_val_lbl.setAccessibleName("Valor de ganancia")
+            self.mute_btn.setAccessibleName("Silenciar salida de audio")
+            self.reset_gain_btn.setAccessibleName("Restablecer ganancia a 0.0 dB")
             self.limiter_cb.setAccessibleName("Limitador suave")
-            self.cap_spin.setAccessibleName("Captura en milisegundos")
+            self.cap_spin.setAccessibleName("Búfer en milisegundos")
             self.chk_spin.setAccessibleName("Paquete en milisegundos")
             self.apply_lat_btn.setAccessibleName("Aplicar latencia")
             self.retry_btn.setAccessibleName("Reintentar conexión")
-            self.toggle_btn.setAccessibleName("Iniciar o detener transmisión")
+            self.toggle_btn.setAccessibleName("Iniciar o detener envío de audio")
+            self.copy_log_btn.setAccessibleName("Copiar registro")
+            self.clear_log_btn.setAccessibleName("Limpiar registro")
             self.log_box.setAccessibleName("Registro de eventos")
 
         def _setup_tray(self):
@@ -1363,11 +1660,30 @@ def run_qt_app(qt_binding):
             self.source_combo.clear()
             for src_id, label in list_audio_sources():
                 self.source_combo.addItem(label, src_id)
+                self.source_combo.setItemData(
+                    self.source_combo.count() - 1,
+                    label,
+                    Qt.ItemDataRole.ToolTipRole,
+                )
             if current_data:
                 idx = self.source_combo.findData(current_data)
                 if idx >= 0:
                     self.source_combo.setCurrentIndex(idx)
             self.source_combo.blockSignals(False)
+            idx = self.source_combo.currentIndex()
+            if idx >= 0:
+                self.controller.set_source_mode(
+                    self.source_combo.itemData(idx),
+                    self.source_combo.itemText(idx),
+                )
+            self._update_source_id_label()
+
+        def _update_source_id_label(self):
+            idx = self.source_combo.currentIndex()
+            source_id = self.source_combo.itemData(idx) if idx >= 0 else None
+            self.source_id_label.setText(
+                f"ID interno: {source_id}" if source_id else ""
+            )
 
         def _apply_saved_settings(self):
             settings = load_settings()
@@ -1376,6 +1692,10 @@ def run_qt_app(qt_binding):
             if isinstance(gain_db, (int, float)):
                 value = int(round(max(-12.0, min(6.0, float(gain_db))) * 10))
                 self.gain_slider.setValue(value)
+
+            muted = settings.get("muted")
+            if isinstance(muted, bool):
+                self.mute_btn.setChecked(muted)
 
             limiter = settings.get("soft_limiter")
             if isinstance(limiter, bool):
@@ -1409,6 +1729,9 @@ def run_qt_app(qt_binding):
                 index = self.source_combo.findData(source)
                 if index >= 0:
                     self.source_combo.setCurrentIndex(index)
+                    self.controller.set_source_mode(
+                        source, self.source_combo.itemText(index)
+                    )
 
         def _save_settings(self):
             if not self._settings_ready:
@@ -1422,6 +1745,7 @@ def run_qt_app(qt_binding):
                     "source_mode": self.source_combo.currentData() or "__default__",
                     "rate_mode": self.rate_combo.currentData() or "native",
                     "gain_db": self.controller.gain_db,
+                    "muted": self.mute_btn.isChecked(),
                     "soft_limiter": self.limiter_cb.isChecked(),
                     "theme": self._theme,
                 }
@@ -1430,8 +1754,9 @@ def run_qt_app(qt_binding):
         def _on_source_changed(self, idx):
             mode = self.source_combo.itemData(idx)
             if mode:
-                self.controller.set_source_mode(mode)
+                self.controller.set_source_mode(mode, self.source_combo.itemText(idx))
                 self._save_settings()
+            self._update_source_id_label()
 
         def _on_rate_changed(self, idx):
             mode = self.rate_combo.itemData(idx)
@@ -1444,6 +1769,25 @@ def run_qt_app(qt_binding):
             self.gain_val_lbl.setText(f"{db:+.1f} dB")
             self.controller.set_gain_db(db)
             self._save_settings()
+
+        def _on_mute_toggled(self, muted):
+            self.controller.set_muted(muted)
+            if muted:
+                self.mute_btn.setText("Reactivar")
+                self.mute_btn.setToolTip(
+                    "Quitar el silencio y volver al nivel de ganancia anterior"
+                )
+                self.mute_btn.setAccessibleName("Reactivar salida de audio")
+            else:
+                self.mute_btn.setText("Silenciar")
+                self.mute_btn.setToolTip(
+                    "Silenciar la salida sin perder el nivel de ganancia"
+                )
+                self.mute_btn.setAccessibleName("Silenciar salida de audio")
+            self._save_settings()
+
+        def _on_reset_gain(self):
+            self.gain_slider.setValue(0)
 
         def _on_limiter_toggled(self, enabled):
             self.controller.set_soft_limiter(enabled)
@@ -1543,9 +1887,34 @@ def run_qt_app(qt_binding):
                 QTimer.singleShot(0, self._refresh_rendered_ui)
 
         def _append_log(self, msg):
-            ts = time.strftime("%H:%M:%S")
-            self.log_box.appendPlainText(f"[{ts}] {msg}")
             log(msg)
+            repeated, count = self._log_counter.register(msg)
+            line = self._format_log_line(msg, count)
+            if repeated:
+                cursor = self.log_box.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.StartOfBlock,
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                cursor.insertText(line)
+                self.log_box.setTextCursor(cursor)
+            else:
+                self.log_box.appendPlainText(line)
+
+        @staticmethod
+        def _format_log_line(msg, count=1):
+            line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+            return f"{line} (×{count})" if count > 1 else line
+
+        def _clear_log(self):
+            self.log_box.clear()
+            self._log_counter.reset()
+
+        def _copy_log(self):
+            QApplication.clipboard().setText(self.log_box.toPlainText())
+            self.copy_log_btn.setText("Copiado")
+            QTimer.singleShot(1500, lambda: self.copy_log_btn.setText("Copiar"))
 
         def _open_logs(self):
             if not open_log_folder():
@@ -1730,6 +2099,11 @@ def run_qt_app(qt_binding):
                     padding: 2px 8px;
                     font-size: 11px;
                     border-radius: 5px;
+                }
+                QPushButton#miniBtn:checked {
+                    background-color: $error_bg;
+                    color: $error_fg;
+                    border: 1px solid $error_border;
                 }
                 QPlainTextEdit {
                     background-color: $log_bg;
@@ -1932,7 +2306,7 @@ def run_tk_app():
     hdr = tk.Frame(root, bg="#16181d")
     hdr.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
     tk.Label(hdr, text=f"USB Audio Stream v{APP_VERSION}", bg="#16181d", fg="#f3f4f6", font=("Sans", 14, "bold")).pack(anchor="w")
-    tk.Label(hdr, text="Audio de PipeWire hacia Android por cable USB (ADB)", bg="#16181d", fg="#9aa0ae", font=("Sans", 9)).pack(anchor="w")
+    tk.Label(hdr, text="Salida de audio de PipeWire hacia Android por cable USB (ADB)", bg="#16181d", fg="#9aa0ae", font=("Sans", 9)).pack(anchor="w")
 
     update_var = tk.StringVar(value="Buscando actualizaciones...")
     update_row = tk.Frame(hdr, bg="#16181d")
@@ -2017,9 +2391,9 @@ def run_tk_app():
     cfg = tk.Frame(root, bg="#1f232b", highlightbackground="#2e3440", highlightthickness=1)
     cfg.grid(row=2, column=0, sticky="ew", padx=18, pady=6)
 
-    tk.Label(cfg, text="FUENTE DE AUDIO Y FRECUENCIA", bg="#1f232b", fg="#8b93a5", font=("Sans", 8, "bold")).pack(anchor="w", padx=14, pady=(8, 4))
+    tk.Label(cfg, text="SALIDA DE AUDIO Y FRECUENCIA", bg="#1f232b", fg="#8b93a5", font=("Sans", 8, "bold")).pack(anchor="w", padx=14, pady=(8, 4))
     src_row = tk.Frame(cfg, bg="#1f232b")
-    src_row.pack(fill="x", padx=14, pady=(0, 8))
+    src_row.pack(fill="x", padx=14, pady=(0, 2))
 
     sources_map = {}
     src_combo = ttk.Combobox(src_row, state="readonly")
@@ -2029,11 +2403,22 @@ def run_tk_app():
     rate_combo.current(0)
     rate_combo.pack(side="right")
 
+    source_id_var = tk.StringVar(value="")
+    source_id_lbl = tk.Label(
+        cfg, textvariable=source_id_var, bg="#1f232b", fg="#8b93a5",
+        font=("Sans", 8), anchor="w", justify="left", wraplength=460,
+    )
+    source_id_lbl.pack(fill="x", padx=14, pady=(0, 6))
+
     gain_row = tk.Frame(cfg, bg="#1f232b")
-    gain_row.pack(fill="x", padx=14, pady=(0, 8))
+    gain_row.pack(fill="x", padx=14, pady=(0, 2))
     tk.Label(gain_row, text="Ganancia:", bg="#1f232b", fg="#cfd5e2").pack(side="left")
     gain_var = tk.DoubleVar(value=0.0)
     lim_var = tk.BooleanVar(value=True)
+    mute_var = tk.BooleanVar(value=False)
+
+    gain_tools = tk.Frame(cfg, bg="#1f232b")
+    gain_tools.pack(fill="x", padx=14, pady=(0, 8))
 
     profile_row = tk.Frame(cfg, bg="#1f232b")
     profile_row.pack(fill="x", padx=14, pady=(0, 8))
@@ -2049,7 +2434,7 @@ def run_tk_app():
 
     lat_frame = tk.Frame(cfg, bg="#1f232b")
     lat_frame.pack(fill="x", padx=14, pady=(0, 10))
-    tk.Label(lat_frame, text="Captura:", bg="#1f232b", fg="#cfd5e2").pack(side="left")
+    tk.Label(lat_frame, text="Búfer:", bg="#1f232b", fg="#cfd5e2").pack(side="left")
     cap_spin = tk.Spinbox(lat_frame, from_=2, to=100, width=4)
     cap_spin.delete(0, "end")
     cap_spin.insert(0, str(DEFAULT_CAPTURE_MS))
@@ -2062,6 +2447,8 @@ def run_tk_app():
     chk_spin.pack(side="left", padx=(4, 10))
 
     log_lines = deque(maxlen=MAX_LOG_LINES)
+    log_counter = LogRepeatCounter()
+    log_lock = threading.Lock()
     log_hdr = tk.Frame(root, bg="#16181d")
     log_hdr.grid(row=4, column=0, sticky="ew", padx=18, pady=(4, 2))
     tk.Label(log_hdr, text="LOG EN VIVO", bg="#16181d", fg="#8b93a5", font=("Sans", 8, "bold")).pack(side="left")
@@ -2070,6 +2457,26 @@ def run_tk_app():
         if not open_log_folder():
             append_log("No se pudo abrir la carpeta de logs.")
 
+    def copy_log_tk():
+        with log_lock:
+            text = "\n".join(log_lines)
+        root.clipboard_clear()
+        root.clipboard_append(text)
+
+    def clear_log_tk():
+        with log_lock:
+            log_lines.clear()
+            log_counter.reset()
+        log_box.delete("1.0", "end")
+
+    tk.Button(
+        log_hdr, text="Limpiar", command=clear_log_tk, bg="#282d37",
+        fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
+    ).pack(side="right", padx=(6, 0))
+    tk.Button(
+        log_hdr, text="Copiar", command=copy_log_tk, bg="#282d37",
+        fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
+    ).pack(side="right", padx=(6, 0))
     tk.Button(
         log_hdr, text="Abrir carpeta", command=open_logs_tk, bg="#282d37",
         fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
@@ -2079,12 +2486,20 @@ def run_tk_app():
     log_box.grid(row=5, column=0, sticky="nsew", padx=18, pady=(0, 14))
 
     def append_log(msg):
-        ts = time.strftime("%H:%M:%S")
-        log_lines.append(f"[{ts}] {msg}")
         log(msg)
+        with log_lock:
+            repeated, count = log_counter.register(msg)
+            ts = time.strftime("%H:%M:%S")
+            line = f"[{ts}] {msg}" + (f" (×{count})" if count > 1 else "")
+            if repeated and log_lines:
+                log_lines[-1] = line
+            else:
+                log_lines.append(line)
         def _sync():
+            with log_lock:
+                text = "\n".join(log_lines)
             log_box.delete("1.0", "end")
-            log_box.insert("end", "\n".join(log_lines) + "\n")
+            log_box.insert("end", text + "\n")
             log_box.see("end")
         root.after(0, _sync)
 
@@ -2207,6 +2622,7 @@ def run_tk_app():
                 "source_mode": sources_map.get(src_combo.get(), "__default__"),
                 "rate_mode": "native" if rate_combo.get() == "Nativa" else rate_combo.get(),
                 "gain_db": gain,
+                "muted": bool(mute_var.get()),
                 "soft_limiter": bool(lim_var.get()),
             }
         )
@@ -2219,6 +2635,11 @@ def run_tk_app():
             gain = max(-12.0, min(6.0, float(gain)))
             gain_var.set(gain)
             ctrl.set_gain_db(gain)
+
+        muted = settings.get("muted")
+        if isinstance(muted, bool):
+            mute_var.set(muted)
+            ctrl.set_muted(muted)
 
         limiter = settings.get("soft_limiter")
         if isinstance(limiter, bool):
@@ -2246,7 +2667,8 @@ def run_tk_app():
             for label, source_id in sources_map.items():
                 if source_id == source_mode:
                     src_combo.set(label)
-                    ctrl.set_source_mode(source_mode)
+                    ctrl.set_source_mode(source_mode, label)
+                    update_source_id()
                     break
 
         capture = settings.get("capture_ms")
@@ -2394,12 +2816,32 @@ def run_tk_app():
         highlightthickness=0, command=on_gain_changed
     ).pack(side="left", fill="x", expand=True, padx=8)
 
+    def on_mute_changed():
+        ctrl.set_muted(bool(mute_var.get()))
+        save_settings_tk()
+
+    tk.Checkbutton(
+        gain_tools, text="Silenciar salida", variable=mute_var,
+        bg="#1f232b", fg="#cfd5e2", selectcolor="#16181d",
+        command=on_mute_changed
+    ).pack(side="left")
+
+    def on_reset_gain():
+        gain_var.set(0.0)
+        ctrl.set_gain_db(0.0)
+        save_settings_tk()
+
+    tk.Button(
+        gain_tools, text="0.0 dB", command=on_reset_gain, bg="#282d37",
+        fg="#e6e8ee", relief="flat", font=("Sans", 8, "bold"), padx=8,
+    ).pack(side="left", padx=(8, 0))
+
     def on_limiter_changed():
         ctrl.set_soft_limiter(lim_var.get())
         save_settings_tk()
 
     tk.Checkbutton(
-        gain_row, text="Limitador", variable=lim_var,
+        gain_tools, text="Limitador", variable=lim_var,
         bg="#1f232b", fg="#cfd5e2", selectcolor="#16181d",
         command=on_limiter_changed
     ).pack(side="right")
@@ -2411,9 +2853,18 @@ def run_tk_app():
     if opts:
         src_combo.current(0)
 
+    def update_source_id(*_args):
+        label = src_combo.get()
+        source_id = sources_map.get(label, "__default__")
+        source_id_var.set(f"ID interno: {source_id}")
+
     def on_source_selected(_event):
-        ctrl.set_source_mode(sources_map.get(src_combo.get(), "__default__"))
+        label = src_combo.get()
+        ctrl.set_source_mode(sources_map.get(label, "__default__"), label)
+        update_source_id()
         save_settings_tk()
+
+    update_source_id()
 
     def on_rate_selected(_event):
         mode = "native" if rate_combo.get() == "Nativa" else rate_combo.get()
@@ -2473,6 +2924,7 @@ def run_tk_app():
             st_lbl.configure(wraplength=wrap - 30)
             adb_detail_lbl.configure(wraplength=wrap - 60)
             update_lbl.configure(wraplength=wrap)
+            source_id_lbl.configure(wraplength=wrap)
 
     root.bind("<Configure>", on_configure)
 
