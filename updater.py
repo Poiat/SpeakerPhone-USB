@@ -298,12 +298,29 @@ rm -f {shlex.quote(script_path)}
         return ApplyResult(False, f"No se pudo aplicar: {exc}", folder=os.path.dirname(download_path))
 
 
+def _remove_download_dir(download_path):
+    """Elimina la carpeta temporal creada por download_update."""
+    if not download_path:
+        return
+    directory = os.path.dirname(os.path.abspath(download_path))
+    if os.path.basename(directory).startswith("speakerphone-update-"):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def apply_update(download_path, asset_name):
     """Aplica el paquete y lanza el reinicio cuando es posible."""
     if sys.platform.startswith("linux"):
-        return _apply_linux(download_path, asset_name)
-    if sys.platform.startswith("win"):
-        return _apply_windows(download_path, asset_name)
-    if sys.platform == "darwin":
-        return _apply_macos(download_path, asset_name)
-    return ApplyResult(False, "Plataforma no soportada.", folder=os.path.dirname(download_path))
+        result = _apply_linux(download_path, asset_name)
+    elif sys.platform.startswith("win"):
+        result = _apply_windows(download_path, asset_name)
+    elif sys.platform == "darwin":
+        result = _apply_macos(download_path, asset_name)
+    else:
+        result = ApplyResult(
+            False, "Plataforma no soportada.", folder=os.path.dirname(download_path)
+        )
+    if result.ok:
+        # El paquete ya está aplicado (o copiado a su destino): liberar la
+        # descarga temporal. En /tmp tmpfs esto devuelve ~90 MB de RAM.
+        _remove_download_dir(download_path)
+    return result
