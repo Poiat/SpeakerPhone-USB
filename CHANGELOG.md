@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.25.0
+
+- Protocolo v2: Android envía telemetría cada ~500 ms por el mismo socket (underruns, búfer activo y backlog); PC y APK deben actualizarse juntos.
+- PC: muestra la telemetría del móvil en la tarjeta de estado y sube automáticamente su búfer un paso (8 → 15 → 30 → 60 ms) cuando el móvil está cerca de su máximo y hay underruns persistentes. El ajuste es temporal y se restablece al reiniciar o cambiar el perfil.
+- `check_version.py` valida también las constantes de protocolo compartidas entre Python y Kotlin.
+- Tests del formato de telemetría, de la decisión de ajuste y del lector en Linux.
+- Versión 0.25.0 en PC y Android.
+
 ## 0.24.0
 
 - Interfaz: hoja de estilos compartida con tarjetas, badges, sliders y scrollbars para Linux, Windows y macOS; Linux y Windows usan el mismo nombre y estructura visual.

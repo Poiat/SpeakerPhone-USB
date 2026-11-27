@@ -1,3 +1,3 @@
 """Versión actual de las aplicaciones de escritorio de SpeakerPhone-USB."""
 
-APP_VERSION = "0.24.0"
+APP_VERSION = "0.25.0"
