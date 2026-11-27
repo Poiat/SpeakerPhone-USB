@@ -729,7 +729,7 @@ class StreamController:
 
 def run_qt_app(qt_binding):
     if qt_binding == "PySide6":
-        from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer
+        from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer, QEvent
         from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PySide6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -738,7 +738,7 @@ def run_qt_app(qt_binding):
             QMenu, QScrollArea, QDialog
         )
     else:
-        from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl, QTimer
+        from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl, QTimer, QEvent
         from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PyQt6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -819,6 +819,8 @@ def run_qt_app(qt_binding):
             self._force_quit = False
             self._status_color = "#eab308"
             self._is_clipping = False
+            self._badge_state = None
+            self._pending_level = 0.0
             self._update_url = RELEASES_URL
             self._settings_ready = False
             self._theme = valid_theme(load_settings().get("theme", "dark"))
@@ -1235,7 +1237,7 @@ def run_qt_app(qt_binding):
             if self.isVisible():
                 self.hide()
             else:
-                self.show()
+                self.showNormal()
                 self.raise_()
                 self.activateWindow()
 
@@ -1486,24 +1488,59 @@ def run_qt_app(qt_binding):
                 self.tray.setToolTip(f"USB Audio Stream v{APP_VERSION} — {text}")
             self._refresh_tray_icon()
 
+        def _ui_rendering(self):
+            """True solo si la ventana está visible, restaurada y en primer plano."""
+            return (
+                self.isVisible()
+                and not self.isMinimized()
+                and self.isActiveWindow()
+            )
+
         def _update_level(self, level, clipping):
             clipping = bool(clipping)
-            self.level_bar.setValue(int(level * 100))
+            self._pending_level = float(level)
             if clipping != self._is_clipping:
                 self._is_clipping = clipping
-                if clipping:
-                    self.clip_badge.setText("SATURACIÓN (CLIP)")
-                    self.clip_badge.setObjectName("clipAlert")
-                    self.level_bar.setObjectName("vuClip")
-                else:
-                    self.clip_badge.setText("SEÑAL OK")
-                    self.clip_badge.setObjectName("clipOk")
-                    self.level_bar.setObjectName("vuNormal")
-                self.clip_badge.style().unpolish(self.clip_badge)
-                self.clip_badge.style().polish(self.clip_badge)
-                self.level_bar.style().unpolish(self.level_bar)
-                self.level_bar.style().polish(self.level_bar)
                 self._refresh_tray_icon()
+            if not self._ui_rendering():
+                return
+            self._render_level()
+
+        def _render_level(self):
+            self.level_bar.setValue(int(self._pending_level * 100))
+            if self._badge_state != self._is_clipping:
+                self._badge_state = self._is_clipping
+                self._apply_clip_badge()
+
+        def _apply_clip_badge(self):
+            if self._is_clipping:
+                self.clip_badge.setText("SATURACIÓN (CLIP)")
+                self.clip_badge.setObjectName("clipAlert")
+                self.level_bar.setObjectName("vuClip")
+            else:
+                self.clip_badge.setText("SEÑAL OK")
+                self.clip_badge.setObjectName("clipOk")
+                self.level_bar.setObjectName("vuNormal")
+            self.clip_badge.style().unpolish(self.clip_badge)
+            self.clip_badge.style().polish(self.clip_badge)
+            self.level_bar.style().unpolish(self.level_bar)
+            self.level_bar.style().polish(self.level_bar)
+
+        def _refresh_rendered_ui(self):
+            if self._ui_rendering():
+                self._render_level()
+
+        def showEvent(self, event):
+            super().showEvent(event)
+            QTimer.singleShot(0, self._refresh_rendered_ui)
+
+        def changeEvent(self, event):
+            super().changeEvent(event)
+            if event.type() in (
+                QEvent.Type.ActivationChange,
+                QEvent.Type.WindowStateChange,
+            ):
+                QTimer.singleShot(0, self._refresh_rendered_ui)
 
         def _append_log(self, msg):
             ts = time.strftime("%H:%M:%S")
@@ -1737,18 +1774,19 @@ def run_qt_app(qt_binding):
             self.setWindowTitle(f"Actualización v{update.get('latest', '')}")
             self.setWindowFlag(Qt.WindowType.Window, True)
             self.setMinimumWidth(480)
-            self.setStyleSheet("""
-                QDialog { background-color: #16181d; }
-                QLabel { color: #e6e8ee; font-size: 12px; }
-                QLabel#titleLabel { font-size: 17px; font-weight: bold; color: #f8fafc; }
-                QProgressBar { background-color: #111317; border: 1px solid #2e3440;
+            palette = get_theme(getattr(parent, "_theme", "dark"))
+            self.setStyleSheet(Template("""
+                QDialog { background-color: $bg; }
+                QLabel { color: $text; font-size: 12px; }
+                QLabel#titleLabel { font-size: 17px; font-weight: bold; color: $title; }
+                QProgressBar { background-color: $progress_bg; border: 1px solid $border;
                                border-radius: 5px; }
-                QProgressBar::chunk { background-color: #2563eb; border-radius: 4px; }
-                QPushButton { background-color: #282d37; border: 1px solid #3a4150;
-                              border-radius: 8px; padding: 7px 14px; color: #e6e8ee;
+                QProgressBar::chunk { background-color: $accent; border-radius: 4px; }
+                QPushButton { background-color: $button_bg; border: 1px solid $button_border;
+                              border-radius: 8px; padding: 7px 14px; color: $button_text;
                               font-weight: 600; }
-                QPushButton:hover { background-color: #323845; }
-            """)
+                QPushButton:hover { background-color: $button_hover; }
+            """).substitute(palette))
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(20, 18, 20, 16)
@@ -1764,7 +1802,7 @@ def run_qt_app(qt_binding):
             self.progress.setFixedHeight(16)
             self.detail = QLabel("")
             self.detail.setWordWrap(True)
-            self.detail.setStyleSheet("color: #9aa0ae; font-size: 11px;")
+            self.detail.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
 
             buttons = QHBoxLayout()
             self.folder_btn = QPushButton("Abrir carpeta")
@@ -1779,6 +1817,14 @@ def run_qt_app(qt_binding):
             buttons.addStretch(1)
             buttons.addWidget(self.cancel_btn)
             buttons.addWidget(self.close_btn)
+
+            self.setAccessibleName("Ventana de actualización")
+            self.info.setAccessibleName("Estado de la actualización")
+            self.progress.setAccessibleName("Progreso de actualización")
+            self.detail.setAccessibleName("Detalle de la actualización")
+            self.folder_btn.setAccessibleName("Abrir carpeta de descarga")
+            self.cancel_btn.setAccessibleName("Cancelar actualización")
+            self.close_btn.setAccessibleName("Cerrar")
 
             layout.addWidget(title)
             layout.addWidget(self.info)

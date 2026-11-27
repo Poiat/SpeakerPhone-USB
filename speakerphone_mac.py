@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit,
     QProgressBar, QSystemTrayIcon, QMenu, QGroupBox
 )
-from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer
+from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QFont, QDesktopServices
 
 from app_logger import (
@@ -335,6 +335,9 @@ class MainWindow(QMainWindow):
         self._auto_prompted_version = ""
         self._theme = valid_theme(load_settings().get("theme", "dark"))
         self._settings_ready = False
+        self._pending_level = 0.0
+        self._pending_clip = False
+        self._badge_state = None
         self.signals = WorkerSignals()
         self.worker = AudioStreamWorker(self.signals)
         self._init_ui()
@@ -801,11 +804,52 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(icon)
         self.tray_icon.setIcon(icon)
 
+    def _ui_rendering(self):
+        """True solo si la ventana está visible, restaurada y en primer plano."""
+        return (
+            self.isVisible()
+            and not self.isMinimized()
+            and self.isActiveWindow()
+        )
+
     def _update_meter(self, level: float, clipping: bool):
-        self.vu_meter.setValue(int(level))
-        bg = "#E74C3C" if clipping else "#2C3E50"
-        fg = "#FFFFFF" if clipping else "#7F8C8D"
-        self.clip_badge.setStyleSheet(f"background-color: {bg}; color: {fg}; font-weight: bold; border-radius: 4px; padding: 2px;")
+        self._pending_level = float(level)
+        self._pending_clip = bool(clipping)
+        if not self._ui_rendering():
+            return
+        self._render_meter()
+
+    def _render_meter(self):
+        self.vu_meter.setValue(int(self._pending_level))
+        if self._badge_state != self._pending_clip:
+            self._badge_state = self._pending_clip
+            self._apply_clip_badge()
+
+    def _apply_clip_badge(self):
+        if self._pending_clip:
+            bg, fg = "#E74C3C", "#FFFFFF"
+        else:
+            bg, fg = "#2C3E50", "#7F8C8D"
+        self.clip_badge.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; font-weight: bold; "
+            "border-radius: 4px; padding: 2px;"
+        )
+
+    def _refresh_rendered_ui(self):
+        if self._ui_rendering():
+            self._render_meter()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._refresh_rendered_ui)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.ActivationChange,
+            QEvent.Type.WindowStateChange,
+        ):
+            QTimer.singleShot(0, self._refresh_rendered_ui)
 
     def _toggle_visibility(self):
         if self.isVisible():

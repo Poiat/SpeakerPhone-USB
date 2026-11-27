@@ -1,6 +1,7 @@
 """Ventana de actualización en vivo para las apps PySide6 de Windows/macOS."""
 
 import threading
+from string import Template
 
 from PySide6.QtCore import Qt, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from theme import get_theme
 from updater import UpdateCancelled, apply_update, download_update
 
 
@@ -32,18 +34,19 @@ class UpdateWindow(QDialog):
         self.setWindowTitle(f"Actualización v{update.get('latest', '')}")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.setMinimumWidth(480)
-        self.setStyleSheet("""
-            QDialog { background-color: #16181d; }
-            QLabel { color: #e6e8ee; font-size: 12px; }
-            QLabel#titleLabel { font-size: 17px; font-weight: bold; color: #f8fafc; }
-            QProgressBar { background-color: #111317; border: 1px solid #2e3440;
+        palette = get_theme(getattr(parent, "_theme", "dark"))
+        self.setStyleSheet(Template("""
+            QDialog { background-color: $bg; }
+            QLabel { color: $text; font-size: 12px; }
+            QLabel#titleLabel { font-size: 17px; font-weight: bold; color: $title; }
+            QProgressBar { background-color: $progress_bg; border: 1px solid $border;
                            border-radius: 5px; }
-            QProgressBar::chunk { background-color: #2563eb; border-radius: 4px; }
-            QPushButton { background-color: #282d37; border: 1px solid #3a4150;
-                          border-radius: 8px; padding: 7px 14px; color: #e6e8ee;
+            QProgressBar::chunk { background-color: $accent; border-radius: 4px; }
+            QPushButton { background-color: $button_bg; border: 1px solid $button_border;
+                          border-radius: 8px; padding: 7px 14px; color: $button_text;
                           font-weight: 600; }
-            QPushButton:hover { background-color: #323845; }
-        """)
+            QPushButton:hover { background-color: $button_hover; }
+        """).substitute(palette))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
@@ -59,7 +62,7 @@ class UpdateWindow(QDialog):
         self.progress.setFixedHeight(16)
         self.detail = QLabel("")
         self.detail.setWordWrap(True)
-        self.detail.setStyleSheet("color: #9aa0ae; font-size: 11px;")
+        self.detail.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
 
         buttons = QHBoxLayout()
         self.folder_btn = QPushButton("Abrir carpeta")
@@ -74,6 +77,14 @@ class UpdateWindow(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(self.cancel_btn)
         buttons.addWidget(self.close_btn)
+
+        self.setAccessibleName("Ventana de actualización")
+        self.info.setAccessibleName("Estado de la actualización")
+        self.progress.setAccessibleName("Progreso de actualización")
+        self.detail.setAccessibleName("Detalle de la actualización")
+        self.folder_btn.setAccessibleName("Abrir carpeta de descarga")
+        self.cancel_btn.setAccessibleName("Cancelar actualización")
+        self.close_btn.setAccessibleName("Cerrar")
 
         layout.addWidget(title)
         layout.addWidget(self.info)
