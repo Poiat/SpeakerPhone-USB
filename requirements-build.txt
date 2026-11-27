@@ -1,1 +1,3 @@
 pyinstaller==6.22.3
+# pip-audit audita también el entorno de build; 79.x arrastra CVEs.
+setuptools==84.1.0
