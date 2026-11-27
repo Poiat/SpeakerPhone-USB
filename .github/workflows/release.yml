@@ -173,12 +173,12 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.22
+          ### Novedades en 0.22.1
 
-          - **Tema claro/oscuro (Linux, Windows y macOS):** botón en la cabecera para alternar el tema; la preferencia se guarda y se restaura al reiniciar.
-          - **Accesibilidad:** nombres accesibles en los controles principales para lectores de pantalla en las tres apps de PC.
-          - **Windows:** los errores de audio quedan aislados con fallback y los logs se escriben en UTF-8.
-          - **Repositorio:** licencia MIT, guía de contribución, política de seguridad, Dependabot, plantillas de issues/PR y badges en el README.
-          - **Cadena de suministro:** dependencias fijadas por versión, `pip-audit` en CI y `sbom.json` publicado con cada release.
-          - **Versión visible:** `v0.22` en las apps de PC y en Android.
+          - **Actualizador:** elimina el paquete temporal tras aplicar la actualización. Antes quedaban ~90 MB por actualización en `/tmp` (RAM en sistemas con tmpfs).
+          - **Windows/macOS:** el registro en pantalla se limita a 300 líneas para evitar crecimiento indefinido.
+          - **Linux:** el watcher de suspensión/bloqueo se reinicia correctamente y no duplica procesos `gdbus`.
+          - **Linux (fallback Tk):** corregido un `NameError` al mostrar errores de actualización.
+          - **CI:** ruff revisa también los entrypoints de Linux, Windows y macOS.
+          - **Versión visible:** `v0.22.1` en las apps de PC y en Android.
         files: artifacts/*

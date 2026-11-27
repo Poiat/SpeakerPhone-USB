@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.1
+
+- Actualizador: elimina el paquete temporal tras aplicar la actualización; antes quedaban ~90 MB por actualización en `/tmp` (RAM en sistemas con tmpfs).
+- Windows/macOS: el registro en pantalla se limita a 300 líneas para evitar crecimiento indefinido.
+- Linux: el watcher de suspensión/bloqueo se reinicia correctamente y no duplica procesos `gdbus`.
+- Linux (fallback Tk): corregido un `NameError` al mostrar errores de actualización.
+- CI: ruff revisa también los entrypoints de Linux, Windows y macOS.
+- Versión 0.22.1 en PC y Android.
+
 ## 0.22
 
 - Tema claro/oscuro seleccionable en las tres apps de PC, persistente entre sesiones.
