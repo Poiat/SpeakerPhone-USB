@@ -4,6 +4,7 @@ import pytest
 from audio_capture import (
     CaptureFormatError,
     downmix_to_stereo,
+    pcm_chunk_bytes,
     resolve_capture_format,
 )
 
@@ -75,6 +76,28 @@ def test_missing_channels_raises():
 def test_missing_sample_rate_uses_fallback():
     fmt = resolve_capture_format({"maxInputChannels": 2}, 15, fallback_rate=44100)
     assert fmt.rate == 44100
+
+
+def test_chunk_size_is_frame_aligned_at_44100():
+    # El cálculo directo daba 1411 bytes (impar) con 44.1 kHz y 8 ms; el DSP
+    # descartaba un byte por bloque y el stream quedaba desalineado.
+    assert pcm_chunk_bytes(44100, 2, 8) == 1408
+    assert pcm_chunk_bytes(44100, 2, 15) == 2644
+    assert pcm_chunk_bytes(44100, 1, 15) == 1322
+    assert pcm_chunk_bytes(48000, 2, 15) == 2880
+
+
+@pytest.mark.parametrize("rate", [44100, 48000, 96000])
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("chunk_ms", [8, 15, 30])
+def test_chunk_size_always_aligns_to_frames(rate, channels, chunk_ms):
+    size = pcm_chunk_bytes(rate, channels, chunk_ms)
+    assert size % (channels * 2) == 0
+    assert size > 0
+
+
+def test_chunk_size_never_returns_zero():
+    assert pcm_chunk_bytes(1, 1, 1) == 2
 
 
 def test_stereo_passthrough_is_exact():

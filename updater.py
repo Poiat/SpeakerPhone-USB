@@ -202,7 +202,7 @@ def _apply_windows(download_path, asset_name):
     except Exception as exc:
         return ApplyResult(False, f"No se pudo preparar el paquete: {exc}", folder=os.path.dirname(download_path))
 
-    batch_path = os.path.join(tempfile.gettempdir(), "speakerphone-update.cmd")
+    batch_path = ""
     batch = f"""@echo off
 setlocal
 set /a tries=0
@@ -222,8 +222,18 @@ del "%~f0"
 exit /b 1
 """
     try:
-        with open(batch_path, "w", encoding="utf-8", newline="\r\n") as handle:
+        # Nombre aleatorio y exclusivo: evita que otro proceso local pueda
+        # preparar o reemplazar el script en una ruta predecible.
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\r\n",
+            prefix="speakerphone-update-",
+            suffix=".cmd",
+            delete=False,
+        ) as handle:
             handle.write(batch)
+            batch_path = handle.name
         subprocess.Popen(
             ["cmd", "/c", batch_path],
             creationflags=CREATE_NO_WINDOW,
@@ -236,6 +246,11 @@ exit /b 1
             restart_launched=True,
         )
     except Exception as exc:
+        if batch_path:
+            try:
+                os.unlink(batch_path)
+            except OSError:
+                pass
         return ApplyResult(False, f"No se pudo preparar el reinicio: {exc}", folder=os.path.dirname(download_path))
 
 
@@ -249,6 +264,7 @@ def _apply_macos(download_path, asset_name):
         )
 
     workdir = tempfile.mkdtemp(prefix="speakerphone-update-app-")
+    script_dir = None
     try:
         subprocess.run(
             ["ditto", "-x", "-k", download_path, workdir],
@@ -275,18 +291,21 @@ def _apply_macos(download_path, asset_name):
                 folder=os.path.dirname(download_path),
             )
 
-        script_path = os.path.join(tempfile.gettempdir(), "speakerphone-update.sh")
+        # Carpeta privada con nombre aleatorio: el script no vive en /tmp con
+        # un nombre predecible que otro usuario local pueda aprovechar.
+        script_dir = tempfile.mkdtemp(prefix="speakerphone-update-run-")
+        script_path = os.path.join(script_dir, "update.sh")
         script = f"""#!/bin/sh
 sleep 2
 rm -rf {shlex.quote(target)}
 mv {shlex.quote(new_bundle)} {shlex.quote(target)}
 open {shlex.quote(target)}
 rm -rf {shlex.quote(workdir)}
-rm -f {shlex.quote(script_path)}
+rm -rf {shlex.quote(script_dir)}
 """
-        with open(script_path, "w", encoding="utf-8") as handle:
+        fd = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(script)
-        os.chmod(script_path, 0o755)
         subprocess.Popen(["/bin/sh", script_path], start_new_session=True, close_fds=True)
         return ApplyResult(
             True,
@@ -294,6 +313,8 @@ rm -f {shlex.quote(script_path)}
             restart_launched=True,
         )
     except Exception as exc:
+        if script_dir:
+            shutil.rmtree(script_dir, ignore_errors=True)
         shutil.rmtree(workdir, ignore_errors=True)
         return ApplyResult(False, f"No se pudo aplicar: {exc}", folder=os.path.dirname(download_path))
 

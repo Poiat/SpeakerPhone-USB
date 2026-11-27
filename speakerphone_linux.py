@@ -39,6 +39,7 @@ from app_logger import (
 from app_icon import get_icon_path
 from app_settings import load_settings, save_settings
 from app_version import APP_VERSION
+from audio_capture import pcm_chunk_bytes
 from dsp import process_pcm_s16le
 from protocol import pack_header
 from theme import get_theme, valid_theme
@@ -889,7 +890,7 @@ class StreamController:
         sock.settimeout(None)
         sock.sendall(pack_header(self.rate, self.channels, self.chunk_ms))
 
-        chunk = self.channels * 2 * self.rate * self.chunk_ms // 1000
+        chunk = pcm_chunk_bytes(self.rate, self.channels, self.chunk_ms)
         stderr_file = tempfile.TemporaryFile(mode="w+b")
         try:
             cap = subprocess.Popen(

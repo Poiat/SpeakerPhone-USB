@@ -52,6 +52,21 @@ class CaptureFormat:
     frames_per_buffer: int
 
 
+def pcm_chunk_bytes(rate, channels, chunk_ms):
+    """
+    Tamaño de bloque PCM s16le alineado a frames completos.
+
+    Un bloque con un número impar de bytes hace que el DSP descarte el byte
+    sobrante y el flujo s16le quede desalineado (ruido en el móvil). Con
+    44.1 kHz y bloques cortos el cálculo directo cae en tamaños impares, así
+    que se redondea al tamaño de frame (canales × 2 bytes).
+    """
+    frame_bytes = max(1, int(channels)) * 2
+    size = int(rate) * frame_bytes * max(1, int(chunk_ms)) // 1000
+    size -= size % frame_bytes
+    return max(frame_bytes, size)
+
+
 def _positive_int(value) -> int:
     try:
         return max(0, int(round(float(value))))

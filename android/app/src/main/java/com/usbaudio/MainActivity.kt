@@ -299,7 +299,7 @@ class MainActivity : Activity() {
         root.addView(updateRow)
 
         root.addView(TextView(this).apply {
-            text = "127.0.0.1:${AudioStreamService.PORT} · WakeLock activo · $APP_VERSION"
+            text = "127.0.0.1:${AudioStreamService.PORT} · WakeLock al reproducir · $APP_VERSION"
             textSize = 11f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#475569"))
