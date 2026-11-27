@@ -1,10 +1,10 @@
-# PySide6 6.12.0 tiene una regresión de refcount en Signal.emit(): cada emisión
-# desde Python resta una referencia a True y, con Python 3.10/3.11, termina en
-# "Fatal Python error: bool_dealloc" (SIGABRT). Mantener 6.11.2 (verificada)
-# hasta que exista una 6.12.x corregida.
+# Versiones fijadas para builds reproducibles. Los marcadores permiten usar
+# Python 3.11 en CI (PyInstaller) y versiones más nuevas en desarrollo local.
+# PySide6 6.12.0 queda excluida por la regresión de refcount en Signal.emit().
 PySide6==6.11.2
-certifi>=2024.8.30
-numpy>=1.26.0
-PyAudioWPatch>=0.2.12.6; sys_platform == "win32"
-sounddevice>=0.4.6; sys_platform == "linux"
-PyAudio>=0.2.14; sys_platform == "darwin"
+certifi==2026.11.20
+numpy==2.4.6; python_version < "3.12"
+numpy==2.5.5; python_version >= "3.12"
+PyAudioWPatch==0.2.12.9; sys_platform == "win32"
+sounddevice==0.5.6; sys_platform == "linux"
+PyAudio==0.2.14; sys_platform == "darwin"
