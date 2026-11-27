@@ -241,6 +241,9 @@ class SleepLockWatcher:
     def start(self):
         if not shutil.which("gdbus"):
             return
+        if any(thread.is_alive() for thread in self._threads):
+            return
+        self._stop.clear()
         t1 = threading.Thread(target=self._watch_system_sleep, daemon=True)
         t2 = threading.Thread(target=self._watch_session_lock, daemon=True)
         self._threads = [t1, t2]
@@ -249,12 +252,15 @@ class SleepLockWatcher:
 
     def stop(self):
         self._stop.set()
-        for p in self._procs:
+        for p in list(self._procs):
             try:
                 p.terminate()
             except Exception:
                 pass
         self._procs.clear()
+        for thread in self._threads:
+            thread.join(timeout=2)
+        self._threads = []
 
     def _watch_system_sleep(self):
         cmd = [
@@ -724,7 +730,7 @@ class StreamController:
 def run_qt_app(qt_binding):
     if qt_binding == "PySide6":
         from PySide6.QtCore import Qt, Signal, QObject, QUrl, QTimer
-        from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
+        from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PySide6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
@@ -733,7 +739,7 @@ def run_qt_app(qt_binding):
         )
     else:
         from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QUrl, QTimer
-        from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
+        from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QDesktopServices
         from PyQt6.QtWidgets import (
             QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
             QSizePolicy, QLabel, QPushButton, QComboBox, QSpinBox, QSlider,
@@ -2326,9 +2332,8 @@ def run_tk_app():
             except UpdateCancelled:
                 root.after(0, lambda: finish(False, "Actualización cancelada.", ""))
             except Exception as exc:
-                root.after(
-                    0, lambda: finish(False, f"No se pudo actualizar: {exc}", "")
-                )
+                message = f"No se pudo actualizar: {exc}"
+                root.after(0, lambda: finish(False, message, ""))
 
         win.protocol("WM_DELETE_WINDOW", close_window)
         threading.Thread(target=worker, daemon=True).start()
