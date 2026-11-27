@@ -39,7 +39,8 @@ from audio_capture import (
     resolve_capture_format,
 )
 from dsp import process_pcm_s16le
-from protocol import pack_header
+from protocol import pack_header, read_status_frame
+from stream_tuning import auto_tune_target, format_stats
 from update_checker import RELEASES_URL, check_for_update
 from update_window_qt import UpdateWindow
 from theme import valid_theme
@@ -57,6 +58,10 @@ SOCKET_BUFFER_BYTES = 32768
 
 class StreamStalled(ConnectionError):
     """El móvil dejó de leer audio y el socket agotó el tiempo de espera."""
+
+
+class AutoTuned(ConnectionError):
+    """Se subió el búfer del PC y hay que reabrir la sesión."""
 
 
 def boost_thread_priority():
@@ -134,6 +139,8 @@ class WorkerSignals(QObject):
     level_updated = Signal(float, bool)
     adb_checked = Signal(str, str)
     update_checked = Signal(str)
+    stats_updated = Signal(int, int, int, int, bool)
+    auto_tuned = Signal(int)
 
 
 class AudioStreamWorker(threading.Thread):
@@ -154,18 +161,25 @@ class AudioStreamWorker(threading.Thread):
         self._sock = None
         self._stream = None
         self._last_audio_error = None
+        self._auto_tune_ms = None
+        self._auto_tune_to = None
+        self._last_auto_tune_at = 0.0
         self._pa = pyaudio.PyAudio()
 
     def set_device(self, device_index: int):
         with self._lock:
             if self.device_index != device_index:
                 self.device_index = device_index
+                self._auto_tune_ms = None
+                self._auto_tune_to = None
                 self.force_reconnect = True
 
     def set_chunk_ms(self, ms: int):
         with self._lock:
             if self.chunk_ms != ms:
                 self.chunk_ms = ms
+                self._auto_tune_ms = None
+                self._auto_tune_to = None
                 self.force_reconnect = True
 
     def set_gain_db(self, db: float):
@@ -271,6 +285,53 @@ class AudioStreamWorker(threading.Thread):
         )
         return out_bytes, level * 100.0, clipping
 
+    def _status_reader(self, sock):
+        """Lee la telemetría del móvil y decide si el PC debe subir su búfer."""
+        last_underruns = None
+        streak = 0
+        while self.running and self._sock is sock:
+            try:
+                frame = read_status_frame(sock)
+            except socket.timeout:
+                continue
+            except (OSError, ValueError):
+                return
+            if frame is None:
+                return
+
+            underruns = int(frame["underruns"])
+            delta = (
+                0
+                if last_underruns is None
+                else max(0, underruns - last_underruns)
+            )
+            last_underruns = underruns
+            streak = streak + 1 if delta > 0 else 0
+            now = time.monotonic()
+            with self._lock:
+                current = self._auto_tune_ms or self.chunk_ms
+                auto_active = self._auto_tune_ms is not None
+            target = auto_tune_target(
+                current,
+                frame["buffer_ms"],
+                delta,
+                streak,
+                now - self._last_auto_tune_at,
+            )
+            if target and self._auto_tune_to is None:
+                with self._lock:
+                    if self._auto_tune_to is None:
+                        self._auto_tune_to = target
+                self._last_auto_tune_at = now
+                streak = 0
+            self.signals.stats_updated.emit(
+                underruns,
+                frame["buffer_ms"],
+                frame["backlog_ms"],
+                current,
+                auto_active,
+            )
+
     def _log_audio_open_error(self, dev_idx, dev_info, chunk_ms, error, fmt=None):
         """Registra el contexto completo de un fallo al abrir el dispositivo."""
         hostapi_idx = dev_info.get("hostApi", "?")
@@ -340,7 +401,8 @@ class AudioStreamWorker(threading.Thread):
 
             with self._lock:
                 dev_idx = self.device_index
-                chunk_ms = self.chunk_ms
+                chunk_ms = self._auto_tune_ms or self.chunk_ms
+                self._auto_tune_to = None
 
             if dev_idx is None:
                 time.sleep(0.5)
@@ -378,6 +440,9 @@ class AudioStreamWorker(threading.Thread):
 
                 sock.settimeout(SEND_TIMEOUT_SECONDS)
                 sock.sendall(pack_header(fmt.rate, fmt.send_channels, chunk_ms))
+                threading.Thread(
+                    target=self._status_reader, args=(sock,), daemon=True
+                ).start()
 
                 try:
                     self._stream = self._pa.open(
@@ -454,6 +519,25 @@ class AudioStreamWorker(threading.Thread):
                         self.signals.level_updated.emit(lvl, clip)
                         last_ui = now
 
+                    with self._lock:
+                        auto_target = self._auto_tune_to
+                        if auto_target:
+                            self._auto_tune_to = None
+                            self._auto_tune_ms = auto_target
+                    if auto_target:
+                        self.signals.log.emit(
+                            f"[auto] Búfer del PC subido a {auto_target} ms por "
+                            "underruns del móvil; se mantiene hasta reiniciar."
+                        )
+                        self.signals.auto_tuned.emit(auto_target)
+                        raise AutoTuned(
+                            f"Ajuste automático de búfer a {auto_target} ms"
+                        )
+
+            except AutoTuned:
+                self._close_connections()
+                self.signals.level_updated.emit(0.0, False)
+                time.sleep(0.4)
             except StreamStalled as e:
                 self.signals.status_changed.emit(
                     "Reconectando...", "El móvil no responde", "#F39C12"
@@ -710,6 +794,12 @@ class MainWindow(QMainWindow):
         self.vu_meter.setObjectName("vuNormal")
         cc.addWidget(self.vu_meter)
 
+        self.stats_label = QLabel("Móvil: esperando telemetría…")
+        self.stats_label.setObjectName("hintLabel")
+        self.stats_label.setWordWrap(True)
+        self.stats_label.setAccessibleName("Telemetría del móvil")
+        cc.addWidget(self.stats_label)
+
         layout.addWidget(conn_card)
 
         # Tarjeta: fuente, ganancia y latencia
@@ -926,6 +1016,8 @@ class MainWindow(QMainWindow):
         self.signals.level_updated.connect(self._update_meter)
         self.signals.adb_checked.connect(self._on_adb_checked)
         self.signals.update_checked.connect(self._on_update_checked)
+        self.signals.stats_updated.connect(self._update_stats)
+        self.signals.auto_tuned.connect(self._on_auto_tuned)
         self.btn_retry.clicked.connect(self._on_retry)
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_adb_check.clicked.connect(self._refresh_adb_status)
@@ -1058,6 +1150,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh_dev.setAccessibleName("Actualizar fuentes de audio")
         self.vu_meter.setAccessibleName("Nivel de señal")
         self.clip_badge.setAccessibleName("Estado de saturación")
+        self.stats_label.setAccessibleName("Telemetría del móvil")
         self.btn_retry.setAccessibleName("Reintentar conexión")
         self.btn_toggle.setAccessibleName("Iniciar o detener transmisión")
         self.copy_log_btn.setAccessibleName("Copiar registro")
@@ -1249,6 +1342,20 @@ class MainWindow(QMainWindow):
         self.tray_icon.setIcon(icon)
         self.tray_icon.setToolTip(
             f"SpeakerPhone-USB v{APP_VERSION} — {state}: {device_text}"
+        )
+        if state != "Transmitiendo":
+            self.stats_label.setText("Móvil: esperando telemetría…")
+
+    def _update_stats(self, underruns, buffer_ms, backlog_ms, pc_ms, auto):
+        self.stats_label.setText(
+            format_stats(
+                pc_ms, buffer_ms, backlog_ms, underruns, auto=bool(auto)
+            )
+        )
+
+    def _on_auto_tuned(self, target_ms):
+        self.stats_label.setText(
+            f"Ajuste automático: búfer del PC a {int(target_ms)} ms (temporal)"
         )
 
     def _ui_rendering(self):

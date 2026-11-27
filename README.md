@@ -22,7 +22,7 @@ Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a
   * Medidor de nivel de señal (VU meter) e indicador de saturación (**CLIP**).
   * Ajuste de tamaño de búfer / paquete USB (`ms`) para equilibrar entre latencia mínima y estabilidad.
 * **Perfiles de búfer unificados:** Baja latencia, Equilibrado, Alta estabilidad y Máxima estabilidad (60 ms en PC y 72 ms en Android), con los mismos nombres en PC y Android y valores adaptados a cada plataforma.
-* **Resistencia a picos de CPU:** búfer adaptativo en Android que crece ante underruns y vuelve al perfil tras 30 s estable, timeouts de envío con reconexión en PC y prioridad alta del hilo de audio en Windows.
+* **Resistencia a picos de CPU:** búfer adaptativo en Android que crece ante underruns y vuelve al perfil tras 30 s estable, telemetría en vivo hacia el PC (underruns, búfer y backlog) con ajuste automático temporal del búfer del PC, timeouts de envío con reconexión y prioridad alta del hilo de audio en Windows.
 * **Ajustes persistentes:** perfil, salida de audio, frecuencia, ganancia, silencio, limitador, dispositivo, búfer y tema se restauran al reiniciar.
 * **Interfaz unificada y accesible:** tarjetas, badges y controles equivalentes en Linux y Windows (mute, reset, búfer personalizado, copiar/limpiar registro y acciones en la bandeja), tema claro/oscuro en las tres apps de PC y nombres accesibles para lectores de pantalla.
 * **Comprobación de actualizaciones:** consulta GitHub Releases al iniciar (y cada 6 h), con botón manual y enlace de descarga.
@@ -32,7 +32,7 @@ Transmite el audio de tu computadora hacia tu teléfono Android en tiempo real a
   * Visor de registros (*logs*) en vivo para diagnóstico rápido.
 * **Android:** audio focus, adaptación al cambio de salida (USB/Bluetooth) y WakeLock durante la reproducción.
 
-> **Compatibilidad:** desde 0.19 el protocolo está versionado e incluye el tamaño de paquete. Actualiza la app de PC y el APK Android a la misma versión; las versiones anteriores no son compatibles entre sí.
+> **Compatibilidad:** desde 0.25 el protocolo v2 añade telemetría del móvil al PC; desde 0.19 está versionado e incluye el tamaño de paquete. Actualiza la app de PC y el APK Android a la misma versión; las versiones anteriores no son compatibles entre sí.
 
 ---
 
@@ -84,10 +84,10 @@ Para ejecutar las pruebas y el lint:
 pip install -r requirements-dev.txt
 python scripts/check_version.py
 python -m pytest -q
-ruff check --select E9,F app_settings.py app_icon.py app_version.py dsp.py \
-  protocol.py update_checker.py updater.py update_window_qt.py theme.py \
-  app_theme_qt.py speakerphone_linux.py speakerphone_win.py \
-  speakerphone_mac.py scripts tests
+ruff check --select E9,F app_settings.py app_icon.py app_version.py \
+  audio_capture.py dsp.py protocol.py stream_tuning.py update_checker.py \
+  updater.py update_window_qt.py theme.py app_theme_qt.py \
+  speakerphone_linux.py speakerphone_win.py speakerphone_mac.py scripts tests
 ```
 
 Las dependencias están **fijadas por versión** para builds reproducibles

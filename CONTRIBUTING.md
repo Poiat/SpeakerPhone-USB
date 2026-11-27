@@ -15,9 +15,9 @@
 python scripts/check_version.py
 python -m pytest -q
 ruff check --select E9,F app_settings.py app_icon.py app_version.py \
-  audio_capture.py dsp.py protocol.py update_checker.py updater.py \
-  update_window_qt.py theme.py app_theme_qt.py speakerphone_linux.py \
-  speakerphone_win.py speakerphone_mac.py scripts tests
+  audio_capture.py dsp.py protocol.py stream_tuning.py update_checker.py \
+  updater.py update_window_qt.py theme.py app_theme_qt.py \
+  speakerphone_linux.py speakerphone_win.py speakerphone_mac.py scripts tests
 python -m pip check
 ```
 

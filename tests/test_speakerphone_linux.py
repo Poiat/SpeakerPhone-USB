@@ -1,8 +1,11 @@
 import io
+import socket
+import threading
 
 import pytest
 
 import speakerphone_linux
+from protocol import pack_status
 from speakerphone_linux import (
     LogRepeatCounter,
     StreamController,
@@ -186,6 +189,53 @@ def test_mute_preserves_gain_level(monkeypatch):
     controller.set_muted(False)
     assert controller.muted is False
     assert controller.gain_linear == pytest.approx(10 ** (2.0 / 20.0))
+
+
+def test_status_reader_reports_stats_and_schedules_auto_tune(monkeypatch):
+    controller = _controller(monkeypatch)
+    stats = []
+    tunes = []
+    controller.on_stats = lambda *args: stats.append(args)
+    controller.on_auto_tune = lambda *args: tunes.append(args)
+    controller._running = True
+
+    left, right = socket.socketpair()
+    try:
+        # Android: búfer adaptativo al máximo y underruns nuevos cada 500 ms.
+        frames = b"".join(
+            pack_status(underruns, 120, 6) for underruns in range(4)
+        )
+        left.sendall(frames)
+        left.close()
+        reader = threading.Thread(
+            target=controller._status_reader, args=(right,), daemon=True
+        )
+        reader.start()
+        reader.join(timeout=2)
+        assert not reader.is_alive()
+    finally:
+        right.close()
+
+    assert len(stats) == 4
+    assert stats[-1][0] == 3
+    assert stats[-1][1] == 120
+    assert stats[-1][3] == 15
+    # El bucle de audio es quien aplica el cambio; el lector solo lo agenda.
+    assert controller._auto_tune_to == 30
+    assert tunes == []
+
+
+def test_manual_latency_clears_auto_tune(monkeypatch):
+    controller = _controller(monkeypatch)
+    controller._auto_capture_ms = 30
+    controller._auto_chunk_ms = 30
+    controller._auto_tune_to = 30
+
+    controller.set_latency(15, 15)
+
+    assert controller._auto_capture_ms is None
+    assert controller._auto_chunk_ms is None
+    assert controller._auto_tune_to is None
 
 
 def test_source_mode_keeps_readable_label(monkeypatch):

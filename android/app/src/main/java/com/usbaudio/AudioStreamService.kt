@@ -25,6 +25,7 @@ import android.os.SystemClock
 import android.util.Log
 import java.io.DataInputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -43,8 +44,11 @@ class AudioStreamService : Service() {
         private const val CHANNEL_ID = "usb_audio"
         private const val NOTIF_ID = 1
 
-        const val PROTOCOL_VERSION = 1
+        const val PROTOCOL_VERSION = 2
         const val HEADER_SIZE = 11
+        const val STATUS_SIZE = 12
+        const val STATUS_FLAG_STREAMING = 1
+        const val STATUS_INTERVAL_MS = 500L
         const val TRACK_BUFFER_MS = 36  // Perfil "Equilibrado" por defecto
         const val MAX_BACKLOG_MS = 80
         const val MAX_ADAPTIVE_BUFFER_MS = 120
@@ -242,7 +246,9 @@ class AudioStreamService : Service() {
         c.soTimeout = 3000
         c.receiveBufferSize = 32 * 1024
         val din = DataInputStream(c.getInputStream())
-        c.getOutputStream().apply { write(82); flush() }
+        val dout = c.getOutputStream()
+        dout.write(82)
+        dout.flush()
 
         val hdr = ByteArray(HEADER_SIZE)
         din.readFully(hdr)
@@ -300,6 +306,8 @@ class AudioStreamService : Service() {
 
             track.write(ByteArray(chunk), 0, chunk)
             track.play()
+            sendStatus(dout, track.underrunCount, bufferFrames * 1000 / rate, 0)
+            var lastStatus = SystemClock.elapsedRealtime()
             while (running) {
                 try {
                     din.readFully(buf)
@@ -365,6 +373,19 @@ class AudioStreamService : Service() {
                     lastUnderruns = underruns
                     lastBufferCheck = now
                 }
+                if (now - lastStatus >= STATUS_INTERVAL_MS) {
+                    val backlogMs = (
+                        din.available().toLong() * 1000 /
+                            (frameBytes.toLong() * rate)
+                        ).toInt()
+                    sendStatus(
+                        dout,
+                        track.underrunCount,
+                        bufferFrames * 1000 / rate,
+                        backlogMs
+                    )
+                    lastStatus = now
+                }
             }
         } finally {
             activeTrack?.let { track ->
@@ -380,6 +401,24 @@ class AudioStreamService : Service() {
             releaseWakeLock()
             abandonAudioFocus()
         }
+    }
+
+    private fun sendStatus(
+        out: OutputStream,
+        underruns: Int,
+        bufferMs: Int,
+        backlogMs: Int,
+    ) {
+        val frame = ByteBuffer.allocate(STATUS_SIZE)
+        frame.put('U'.code.toByte())
+        frame.put('S'.code.toByte())
+        frame.put(PROTOCOL_VERSION.toByte())
+        frame.putInt(underruns)
+        frame.putShort(bufferMs.coerceIn(0, 65535).toShort())
+        frame.putShort(backlogMs.coerceIn(0, 65535).toShort())
+        frame.put(STATUS_FLAG_STREAMING.toByte())
+        out.write(frame.array())
+        out.flush()
     }
 
     private fun maxAdaptiveMs(): Int =

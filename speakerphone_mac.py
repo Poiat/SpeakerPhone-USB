@@ -32,7 +32,8 @@ from app_settings import load_settings, save_settings
 from app_theme_qt import apply_theme
 from app_version import APP_VERSION
 from dsp import process_pcm_s16le
-from protocol import pack_header
+from protocol import pack_header, read_status_frame
+from stream_tuning import auto_tune_target, format_stats
 from update_checker import RELEASES_URL, check_for_update
 from update_window_qt import UpdateWindow
 from theme import valid_theme
@@ -107,6 +108,12 @@ class WorkerSignals(QObject):
     level_updated = Signal(float, bool)
     adb_checked = Signal(str, str)
     update_checked = Signal(str)
+    stats_updated = Signal(int, int, int, int, bool)
+    auto_tuned = Signal(int)
+
+
+class AutoTuned(ConnectionError):
+    """Se subió el búfer del PC y hay que reabrir la sesión."""
 
 
 class AudioStreamWorker(threading.Thread):
@@ -124,18 +131,25 @@ class AudioStreamWorker(threading.Thread):
         self._lock = threading.Lock()
         self._sock = None
         self._stream = None
+        self._auto_tune_ms = None
+        self._auto_tune_to = None
+        self._last_auto_tune_at = 0.0
         self._pa = pyaudio.PyAudio()
 
     def set_device(self, device_index: int):
         with self._lock:
             if self.device_index != device_index:
                 self.device_index = device_index
+                self._auto_tune_ms = None
+                self._auto_tune_to = None
                 self.force_reconnect = True
 
     def set_chunk_ms(self, ms: int):
         with self._lock:
             if self.chunk_ms != ms:
                 self.chunk_ms = ms
+                self._auto_tune_ms = None
+                self._auto_tune_to = None
                 self.force_reconnect = True
 
     def set_gain_db(self, db: float):
@@ -230,6 +244,53 @@ class AudioStreamWorker(threading.Thread):
         )
         return out_bytes, level * 100.0, clipping
 
+    def _status_reader(self, sock):
+        """Lee la telemetría del móvil y decide si el PC debe subir su búfer."""
+        last_underruns = None
+        streak = 0
+        while self.running and self._sock is sock:
+            try:
+                frame = read_status_frame(sock)
+            except socket.timeout:
+                continue
+            except (OSError, ValueError):
+                return
+            if frame is None:
+                return
+
+            underruns = int(frame["underruns"])
+            delta = (
+                0
+                if last_underruns is None
+                else max(0, underruns - last_underruns)
+            )
+            last_underruns = underruns
+            streak = streak + 1 if delta > 0 else 0
+            now = time.monotonic()
+            with self._lock:
+                current = self._auto_tune_ms or self.chunk_ms
+                auto_active = self._auto_tune_ms is not None
+            target = auto_tune_target(
+                current,
+                frame["buffer_ms"],
+                delta,
+                streak,
+                now - self._last_auto_tune_at,
+            )
+            if target and self._auto_tune_to is None:
+                with self._lock:
+                    if self._auto_tune_to is None:
+                        self._auto_tune_to = target
+                self._last_auto_tune_at = now
+                streak = 0
+            self.signals.stats_updated.emit(
+                underruns,
+                frame["buffer_ms"],
+                frame["backlog_ms"],
+                current,
+                auto_active,
+            )
+
     def run(self):
         last_state = ""
         while self.running:
@@ -261,7 +322,8 @@ class AudioStreamWorker(threading.Thread):
 
             with self._lock:
                 dev_idx = self.device_index
-                chunk_ms = self.chunk_ms
+                chunk_ms = self._auto_tune_ms or self.chunk_ms
+                self._auto_tune_to = None
 
             if dev_idx is None:
                 time.sleep(0.5)
@@ -286,6 +348,9 @@ class AudioStreamWorker(threading.Thread):
 
                 sock.settimeout(SEND_TIMEOUT_SECONDS)
                 sock.sendall(pack_header(rate, ch, chunk_ms))
+                threading.Thread(
+                    target=self._status_reader, args=(sock,), daemon=True
+                ).start()
 
                 self._stream = self._pa.open(
                     format=pyaudio.paInt16,
@@ -318,6 +383,25 @@ class AudioStreamWorker(threading.Thread):
                         self.signals.level_updated.emit(lvl, clip)
                         last_ui = now
 
+                    with self._lock:
+                        auto_target = self._auto_tune_to
+                        if auto_target:
+                            self._auto_tune_to = None
+                            self._auto_tune_ms = auto_target
+                    if auto_target:
+                        self.signals.log.emit(
+                            f"[auto] Búfer del PC subido a {auto_target} ms por "
+                            "underruns del móvil; se mantiene hasta reiniciar."
+                        )
+                        self.signals.auto_tuned.emit(auto_target)
+                        raise AutoTuned(
+                            f"Ajuste automático de búfer a {auto_target} ms"
+                        )
+
+            except AutoTuned:
+                self._close_connections()
+                self.signals.level_updated.emit(0.0, False)
+                time.sleep(0.4)
             except (ConnectionRefusedError, ConnectionError, socket.timeout, BrokenPipeError, OSError) as e:
                 if last_state != "waiting_app":
                     self.signals.status_changed.emit("Reconectando...", info, "#F39C12")
@@ -494,6 +578,12 @@ class MainWindow(QMainWindow):
         row_meter.addWidget(self.clip_badge)
         audio_layout.addLayout(row_meter)
 
+        self.stats_label = QLabel("Móvil: esperando telemetría…")
+        self.stats_label.setObjectName("hintLabel")
+        self.stats_label.setWordWrap(True)
+        self.stats_label.setAccessibleName("Telemetría del móvil")
+        audio_layout.addWidget(self.stats_label)
+
         row_latency = QHBoxLayout()
         row_latency.addWidget(QLabel("Perfil de búfer:"))
         self.combo_profile = QComboBox()
@@ -557,6 +647,8 @@ class MainWindow(QMainWindow):
         self.signals.level_updated.connect(self._update_meter)
         self.signals.adb_checked.connect(self._on_adb_checked)
         self.signals.update_checked.connect(self._on_update_checked)
+        self.signals.stats_updated.connect(self._update_stats)
+        self.signals.auto_tuned.connect(self._on_auto_tuned)
         self.btn_retry.clicked.connect(self._on_retry)
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_adb_check.clicked.connect(self._refresh_adb_status)
@@ -667,6 +759,7 @@ class MainWindow(QMainWindow):
         self.chk_limiter.setAccessibleName("Limitador suave")
         self.vu_meter.setAccessibleName("Nivel de señal")
         self.clip_badge.setAccessibleName("Estado de saturación")
+        self.stats_label.setAccessibleName("Telemetría del móvil")
         self.btn_retry.setAccessibleName("Reintentar conexión")
         self.btn_toggle.setAccessibleName("Iniciar o detener transmisión")
         self.log_view.setAccessibleName("Registro de eventos")
@@ -815,6 +908,20 @@ class MainWindow(QMainWindow):
         icon = self._create_app_icon(color_hex)
         self.setWindowIcon(icon)
         self.tray_icon.setIcon(icon)
+        if state != "Transmitiendo":
+            self.stats_label.setText("Móvil: esperando telemetría…")
+
+    def _update_stats(self, underruns, buffer_ms, backlog_ms, pc_ms, auto):
+        self.stats_label.setText(
+            format_stats(
+                pc_ms, buffer_ms, backlog_ms, underruns, auto=bool(auto)
+            )
+        )
+
+    def _on_auto_tuned(self, target_ms):
+        self.stats_label.setText(
+            f"Ajuste automático: búfer del PC a {int(target_ms)} ms (temporal)"
+        )
 
     def _ui_rendering(self):
         """True solo si la ventana está visible, restaurada y en primer plano."""
