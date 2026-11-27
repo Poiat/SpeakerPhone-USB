@@ -1,0 +1,86 @@
+"""Paletas compartidas para el tema claro/oscuro de las apps de escritorio."""
+
+THEMES = {
+    "dark": {
+        "bg": "#16181d",
+        "panel": "#1f232b",
+        "border": "#2e3440",
+        "text": "#e6e8ee",
+        "title": "#f8fafc",
+        "value": "#f3f4f6",
+        "muted": "#9aa0ae",
+        "section": "#8b93a5",
+        "input_bg": "#16181d",
+        "input_border": "#3a4150",
+        "input_text": "#f3f4f6",
+        "button_bg": "#282d37",
+        "button_border": "#3a4150",
+        "button_text": "#e6e8ee",
+        "button_hover": "#323845",
+        "log_bg": "#111317",
+        "log_border": "#272c36",
+        "log_text": "#9ca3af",
+        "neutral_bg": "#282d37",
+        "neutral_text": "#cfd5e2",
+        "neutral_border": "#3a4150",
+        "progress_bg": "#111317",
+        "ok_bg": "#193226",
+        "ok_fg": "#4ade80",
+        "ok_border": "#22543d",
+        "warn_bg": "#3b2a12",
+        "warn_fg": "#fbbf24",
+        "warn_border": "#b45309",
+        "error_bg": "#451a1a",
+        "error_fg": "#fca5a5",
+        "error_border": "#ef4444",
+        "accent": "#2563eb",
+        "accent_hover": "#1d4ed8",
+        "accent_border": "#3b82f6",
+    },
+    "light": {
+        "bg": "#f4f6f9",
+        "panel": "#ffffff",
+        "border": "#d7dce3",
+        "text": "#1f2937",
+        "title": "#111827",
+        "value": "#1f2937",
+        "muted": "#64748b",
+        "section": "#64748b",
+        "input_bg": "#ffffff",
+        "input_border": "#cbd5e1",
+        "input_text": "#1f2937",
+        "button_bg": "#f1f5f9",
+        "button_border": "#cbd5e1",
+        "button_text": "#1f2937",
+        "button_hover": "#e2e8f0",
+        "log_bg": "#ffffff",
+        "log_border": "#d7dce3",
+        "log_text": "#475569",
+        "neutral_bg": "#e2e8f0",
+        "neutral_text": "#334155",
+        "neutral_border": "#cbd5e1",
+        "progress_bg": "#e8edf3",
+        "ok_bg": "#dcfce7",
+        "ok_fg": "#166534",
+        "ok_border": "#86efac",
+        "warn_bg": "#fef3c7",
+        "warn_fg": "#92400e",
+        "warn_border": "#fbbf24",
+        "error_bg": "#fee2e2",
+        "error_fg": "#991b1b",
+        "error_border": "#fca5a5",
+        "accent": "#2563eb",
+        "accent_hover": "#1d4ed8",
+        "accent_border": "#3b82f6",
+    },
+}
+
+DEFAULT_THEME = "dark"
+
+
+def get_theme(name):
+    return THEMES.get(name, THEMES[DEFAULT_THEME])
+
+
+def valid_theme(name):
+    return name if name in THEMES else DEFAULT_THEME

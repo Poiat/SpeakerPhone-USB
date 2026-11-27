@@ -15,6 +15,7 @@ Novedades v4:
 from collections import deque
 import json
 import math
+from string import Template
 import os
 import re
 import shutil
@@ -39,6 +40,7 @@ from app_settings import load_settings, save_settings
 from app_version import APP_VERSION
 from dsp import process_pcm_s16le
 from protocol import pack_header
+from theme import get_theme, valid_theme
 from update_checker import RELEASES_URL, check_for_update
 from updater import UpdateCancelled, apply_update, can_self_update, download_update
 
@@ -813,6 +815,7 @@ def run_qt_app(qt_binding):
             self._is_clipping = False
             self._update_url = RELEASES_URL
             self._settings_ready = False
+            self._theme = valid_theme(load_settings().get("theme", "dark"))
             self._latest_update = None
             self._update_window = None
             self._auto_prompted_version = ""
@@ -838,6 +841,7 @@ def run_qt_app(qt_binding):
             )
 
             self._build_ui()
+            self._apply_accessibility()
             self._setup_tray()
             self._apply_style()
             self._refresh_sources()
@@ -883,9 +887,17 @@ def run_qt_app(qt_binding):
             title.setObjectName("titleLabel")
             version_label = QLabel(f"v{APP_VERSION}")
             version_label.setObjectName("versionLabel")
+            version_label.setAccessibleName(f"Versión {APP_VERSION}")
+            self.theme_btn = QPushButton("☀ Claro")
+            self.theme_btn.setObjectName("miniBtn")
+            self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.theme_btn.setToolTip("Cambiar entre tema oscuro y claro")
+            self.theme_btn.setAccessibleName("Cambiar tema")
+            self.theme_btn.clicked.connect(self._toggle_theme)
             title_row = QHBoxLayout()
             title_row.addWidget(title)
             title_row.addStretch(1)
+            title_row.addWidget(self.theme_btn)
             title_row.addWidget(version_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
             subtitle = QLabel("Audio de PipeWire hacia Android por cable USB (ADB) • Reconexión automática")
@@ -966,6 +978,7 @@ def run_qt_app(qt_binding):
             self.adb_recheck_btn.setFixedWidth(30)
             self.adb_recheck_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.adb_recheck_btn.setToolTip("Volver a comprobar si adb está instalado y funciona")
+            self.adb_recheck_btn.setAccessibleName("Volver a comprobar ADB")
             self.adb_recheck_btn.clicked.connect(self._refresh_adb_status)
             adb_hdr.addWidget(adb_title)
             adb_hdr.addStretch(1)
@@ -1132,9 +1145,11 @@ def run_qt_app(qt_binding):
             open_logs_btn.setObjectName("miniBtn")
             open_logs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             open_logs_btn.setToolTip(get_log_path() or "Carpeta de logs no disponible")
+            open_logs_btn.setAccessibleName("Abrir carpeta de logs")
             open_logs_btn.clicked.connect(self._open_logs)
             clear_log_btn = QPushButton("Limpiar")
             clear_log_btn.setObjectName("miniBtn")
+            clear_log_btn.setAccessibleName("Limpiar registro")
             clear_log_btn.clicked.connect(lambda: self.log_box.clear())
             log_hdr.addWidget(log_lbl)
             log_hdr.addStretch(1)
@@ -1149,6 +1164,31 @@ def run_qt_app(qt_binding):
             self.log_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.log_box.setPlaceholderText("Eventos de conexión y audio en tiempo real...")
             root.addWidget(self.log_box, 1)
+
+        def _apply_accessibility(self):
+            self.setAccessibleName("USB Audio Stream")
+            self.device_label.setAccessibleName("Dispositivo conectado")
+            self.status_label.setAccessibleName("Estado de conexión")
+            self.level_bar.setAccessibleName("Nivel de señal")
+            self.clip_badge.setAccessibleName("Estado de saturación")
+            self.adb_badge.setAccessibleName("Estado de ADB")
+            self.adb_label.setAccessibleName("Detalle del estado de ADB")
+            self.update_label.setAccessibleName("Estado de actualizaciones")
+            self.update_btn.setAccessibleName("Actualizar aplicación")
+            self.update_check_btn.setAccessibleName("Buscar actualizaciones")
+            self.source_combo.setAccessibleName("Fuente de audio")
+            self.rate_combo.setAccessibleName("Frecuencia de muestreo")
+            self.refresh_src_btn.setAccessibleName("Actualizar fuentes de audio")
+            self.profile_combo.setAccessibleName("Perfil de búfer")
+            self.gain_slider.setAccessibleName("Ganancia")
+            self.gain_val_lbl.setAccessibleName("Valor de ganancia")
+            self.limiter_cb.setAccessibleName("Limitador suave")
+            self.cap_spin.setAccessibleName("Captura en milisegundos")
+            self.chk_spin.setAccessibleName("Paquete en milisegundos")
+            self.apply_lat_btn.setAccessibleName("Aplicar latencia")
+            self.retry_btn.setAccessibleName("Reintentar conexión")
+            self.toggle_btn.setAccessibleName("Iniciar o detener transmisión")
+            self.log_box.setAccessibleName("Registro de eventos")
 
         def _setup_tray(self):
             self.tray = None
@@ -1375,6 +1415,7 @@ def run_qt_app(qt_binding):
                     "rate_mode": self.rate_combo.currentData() or "native",
                     "gain_db": self.controller.gain_db,
                     "soft_limiter": self.limiter_cb.isChecked(),
+                    "theme": self._theme,
                 }
             )
 
@@ -1495,41 +1536,42 @@ def run_qt_app(qt_binding):
                 event.accept()
 
         def _apply_style(self):
-            self.setStyleSheet("""
+            palette = get_theme(self._theme)
+            self.setStyleSheet(Template("""
                 QWidget {
-                    background-color: #16181d;
-                    color: #e6e8ee;
+                    background-color: $bg;
+                    color: $text;
                     font-family: sans-serif;
                     font-size: 13px;
                 }
                 QScrollArea {
-                    background-color: #16181d;
+                    background-color: $bg;
                     border: none;
                 }
                 QLabel#titleLabel {
                     font-size: 18px;
                     font-weight: bold;
-                    color: #f8fafc;
+                    color: $title;
                 }
                 QLabel#versionLabel {
-                    color: #8b93a5;
+                    color: $section;
                     font-size: 11px;
                     font-weight: 600;
                 }
                 QLabel#subtitle {
-                    color: #9aa0ae;
+                    color: $muted;
                     font-size: 12px;
                 }
                 QFrame#card {
-                    background-color: #1f232b;
-                    border: 1px solid #2e3440;
+                    background-color: $panel;
+                    border: 1px solid $border;
                     border-radius: 10px;
                 }
                 QFrame#sep {
-                    color: #2e3440;
+                    color: $border;
                 }
                 QLabel#sectionLabel {
-                    color: #8b93a5;
+                    color: $section;
                     font-size: 10px;
                     font-weight: bold;
                     letter-spacing: 0.6px;
@@ -1537,69 +1579,69 @@ def run_qt_app(qt_binding):
                 QLabel#valueLabel {
                     font-size: 14px;
                     font-weight: 600;
-                    color: #f3f4f6;
+                    color: $value;
                 }
                 QLabel#clipOk {
-                    background-color: #193226;
-                    color: #4ade80;
-                    border: 1px solid #22543d;
+                    background-color: $ok_bg;
+                    color: $ok_fg;
+                    border: 1px solid $ok_border;
                     border-radius: 5px;
                     padding: 2px 8px;
                     font-size: 10px;
                     font-weight: bold;
                 }
                 QLabel#clipAlert {
-                    background-color: #451a1a;
-                    color: #fca5a5;
-                    border: 1px solid #ef4444;
+                    background-color: $error_bg;
+                    color: $error_fg;
+                    border: 1px solid $error_border;
                     border-radius: 5px;
                     padding: 2px 8px;
                     font-size: 10px;
                     font-weight: bold;
                 }
                 QLabel#hintLabel {
-                    color: #9aa0ae;
+                    color: $muted;
                     font-size: 11px;
                 }
                 QLabel#adbOk {
-                    background-color: #193226;
-                    color: #4ade80;
-                    border: 1px solid #22543d;
+                    background-color: $ok_bg;
+                    color: $ok_fg;
+                    border: 1px solid $ok_border;
                     border-radius: 5px;
                     padding: 2px 8px;
                     font-size: 10px;
                     font-weight: bold;
                 }
                 QLabel#adbWarn {
-                    background-color: #3b2a12;
-                    color: #fbbf24;
-                    border: 1px solid #b45309;
+                    background-color: $warn_bg;
+                    color: $warn_fg;
+                    border: 1px solid $warn_border;
                     border-radius: 5px;
                     padding: 2px 8px;
                     font-size: 10px;
                     font-weight: bold;
                 }
                 QLabel#adbError {
-                    background-color: #451a1a;
-                    color: #fca5a5;
-                    border: 1px solid #ef4444;
+                    background-color: $error_bg;
+                    color: $error_fg;
+                    border: 1px solid $error_border;
                     border-radius: 5px;
                     padding: 2px 8px;
                     font-size: 10px;
                     font-weight: bold;
                 }
                 QLabel#adbNeutral {
-                    background-color: #282d37;
-                    color: #cfd5e2;
-                    border: 1px solid #3a4150;
+                    background-color: $neutral_bg;
+                    color: $neutral_text;
+                    border: 1px solid $neutral_border;
                     border-radius: 5px;
                     padding: 2px 8px;
                     font-size: 10px;
                     font-weight: bold;
                 }
                 QProgressBar {
-                    background-color: #111317;
-                    border: 1px solid #2e3440;
+                    background-color: $progress_bg;
+                    border: 1px solid $border;
                     border-radius: 5px;
                 }
                 QProgressBar#vuNormal::chunk {
@@ -1611,35 +1653,35 @@ def run_qt_app(qt_binding):
                     border-radius: 4px;
                 }
                 QComboBox, QSpinBox {
-                    background-color: #16181d;
-                    border: 1px solid #3a4150;
+                    background-color: $input_bg;
+                    border: 1px solid $input_border;
                     border-radius: 6px;
                     padding: 5px 8px;
-                    color: #f3f4f6;
+                    color: $input_text;
                     font-size: 12px;
                 }
                 QCheckBox {
-                    color: #cfd5e2;
+                    color: $neutral_text;
                     spacing: 6px;
                 }
                 QPushButton {
-                    background-color: #282d37;
-                    border: 1px solid #3a4150;
+                    background-color: $button_bg;
+                    border: 1px solid $button_border;
                     border-radius: 8px;
                     padding: 8px 14px;
                     font-weight: 600;
-                    color: #e6e8ee;
+                    color: $button_text;
                 }
                 QPushButton:hover {
-                    background-color: #323845;
+                    background-color: $button_hover;
                 }
                 QPushButton#primaryBtn {
-                    background-color: #2563eb;
-                    border: 1px solid #3b82f6;
+                    background-color: $accent;
+                    border: 1px solid $accent_border;
                     color: #ffffff;
                 }
                 QPushButton#primaryBtn:hover {
-                    background-color: #1d4ed8;
+                    background-color: $accent_hover;
                 }
                 QPushButton#miniBtn {
                     padding: 2px 8px;
@@ -1647,15 +1689,31 @@ def run_qt_app(qt_binding):
                     border-radius: 5px;
                 }
                 QPlainTextEdit {
-                    background-color: #111317;
-                    border: 1px solid #272c36;
+                    background-color: $log_bg;
+                    border: 1px solid $log_border;
                     border-radius: 8px;
-                    color: #9ca3af;
+                    color: $log_text;
                     font-family: monospace;
                     font-size: 11px;
                     padding: 6px;
                 }
-            """)
+            """).substitute(palette))
+            self._update_theme_button()
+
+        def _update_theme_button(self):
+            if self._theme == "light":
+                self.theme_btn.setText("🌙 Oscuro")
+                self.theme_btn.setToolTip("Cambiar al tema oscuro")
+                self.theme_btn.setAccessibleDescription("Cambiar al tema oscuro")
+            else:
+                self.theme_btn.setText("☀ Claro")
+                self.theme_btn.setToolTip("Cambiar al tema claro")
+                self.theme_btn.setAccessibleDescription("Cambiar al tema claro")
+
+        def _toggle_theme(self):
+            self._theme = "light" if self._theme == "dark" else "dark"
+            self._apply_style()
+            self._save_settings()
 
     class UpdateWindow(QDialog):
         progress_sig = Signal(int, int)
