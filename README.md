@@ -84,7 +84,8 @@ python scripts/check_version.py
 python -m pytest -q
 ruff check --select E9,F app_settings.py app_icon.py app_version.py dsp.py \
   protocol.py update_checker.py updater.py update_window_qt.py theme.py \
-  app_theme_qt.py scripts tests
+  app_theme_qt.py speakerphone_linux.py speakerphone_win.py \
+  speakerphone_mac.py scripts tests
 ```
 
 Las dependencias están **fijadas por versión** para builds reproducibles
