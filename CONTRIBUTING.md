@@ -8,6 +8,8 @@
 - Dependencias de runtime: `pip install -r requirements.txt`
 - Herramientas de desarrollo: `pip install -r requirements-dev.txt`
 - Build de escritorio: `pip install -r requirements-build.txt`
+- Android: compila con JDK 17 (`JAVA_HOME=/usr/lib/jvm/java-17-openjdk`).
+  Con JDK 27, la tarea `lintVitalRelease` de AGP 8.5.2 falla.
 
 ## Antes de enviar cambios
 

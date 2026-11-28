@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.1
+
+- Android: el búfer de reproducción se dimensiona según el paquete real del PC (`chunk_ms + 16 ms`). Antes, un paquete mayor que el perfil del móvil (por ejemplo, 60 ms en el PC con 36 ms en Android) hacía que el `AudioTrack` se quedara sin datos de forma continua y el audio sonara entrecortado o «ahogado».
+- Android: las actualizaciones de la notificación por búfer adaptativo se envían al hilo principal, sin bloquear el hilo de audio justo después de un underrun.
+- Versión 0.25.1 en PC y Android.
+
 ## 0.25.0
 
 - Protocolo v2: Android envía telemetría cada ~500 ms por el mismo socket (underruns, búfer activo y backlog); PC y APK deben actualizarse juntos.

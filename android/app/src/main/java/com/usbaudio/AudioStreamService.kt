@@ -52,6 +52,10 @@ class AudioStreamService : Service() {
         const val TRACK_BUFFER_MS = 36  // Perfil "Equilibrado" por defecto
         const val MAX_BACKLOG_MS = 80
         const val MAX_ADAPTIVE_BUFFER_MS = 120
+        // Margen mínimo sobre el paquete del PC para absorber el jitter del
+        // túnel USB. Sin él, si el paquete supera el búfer configurado el
+        // AudioTrack se queda sin datos de forma continua.
+        const val MIN_BUFFER_HEADROOM_MS = 16
         const val ADAPTIVE_STEP_MS = 8
         const val BUFFER_CHECK_MS = 500L
         const val BUFFER_STABLE_MS = 30_000L
@@ -281,26 +285,43 @@ class AudioStreamService : Service() {
         try {
             val frameBytes = channels * 2
             val fmtLabel = "$rate Hz · ${if (channels == 1) "Mono" else "Estéreo"}"
+            // Alineado a frames: con 44.1 kHz y 8 ms el cálculo directo da
+            // 1411 bytes y desalinea el PCM (ruido e intercambio de canales).
+            val chunk = (frameBytes * rate * chunkMs / 1000) / frameBytes * frameBytes
+            // El perfil del móvil y el paquete del PC se eligen por separado.
+            // Si el paquete supera el búfer configurado, cada escritura no
+            // cabe, el AudioTrack se queda sin datos de forma continua y el
+            // audio suena entrecortado ("ahogado"). El búfer de la sesión
+            // reserva siempre el paquete completo más un margen de jitter.
+            val sessionBufferMs = maxOf(
+                trackBufferMs,
+                chunkMs + MIN_BUFFER_HEADROOM_MS,
+            )
+            val maxBufferMs = maxAdaptiveMs(sessionBufferMs)
             streaming = true
             activeFormat = fmtLabel
             broadcastStatus()
 
-            val track = createTrack(rate, channels)
+            val track = createTrack(rate, channels, sessionBufferMs, maxBufferMs)
             activeTrack = track
-            // Alineado a frames: con 44.1 kHz y 8 ms el cálculo directo da
-            // 1411 bytes y desalinea el PCM (ruido e intercambio de canales).
-            val chunk = (frameBytes * rate * chunkMs / 1000) / frameBytes * frameBytes
             val backlogMs = maxOf(MAX_BACKLOG_MS, chunkMs * 2)
             val maxBacklog = frameBytes * rate * backlogMs / 1000
             val buf = ByteArray(chunk)
-            updateNotification("Reproduciendo · $fmtLabel (${trackBufferMs} ms)")
+            val bufferNote =
+                if (sessionBufferMs != trackBufferMs) " · ajustado al paquete del PC" else ""
+            Log.i(
+                TAG,
+                "Sesión $rate Hz/$channels canales: paquete ${chunkMs} ms, " +
+                    "búfer ${sessionBufferMs} ms (perfil ${trackBufferMs} ms)"
+            )
+            updateNotification("Reproduciendo · $fmtLabel (${sessionBufferMs} ms$bufferNote)")
 
             val requestedFrames = track.bufferSizeInFrames
             var bufferFrames = requestedFrames
             var lastUnderruns = track.underrunCount
             var lastBufferCheck = SystemClock.elapsedRealtime()
             var stableSince = lastBufferCheck
-            val maxFrames = rate * maxAdaptiveMs() / 1000
+            val maxFrames = rate * maxBufferMs / 1000
             val stepFrames = maxOf(1, rate * ADAPTIVE_STEP_MS / 1000)
             adaptiveBufferMs = bufferFrames * 1000 / rate
 
@@ -344,10 +365,19 @@ class AudioStreamService : Service() {
                             if (applied > bufferFrames) {
                                 bufferFrames = applied
                                 adaptiveBufferMs = applied * 1000 / rate
-                                updateNotification(
-                                    "Reproduciendo · $fmtLabel · búfer adaptativo " +
-                                        "$adaptiveBufferMs ms"
-                                )
+                                // La notificación implica una llamada de binder;
+                                // se envía al hilo principal para no retrasar la
+                                // siguiente lectura/escritura de audio justo
+                                // cuando el búfer viene de un underrun.
+                                val appliedMs = adaptiveBufferMs
+                                mainHandler.post {
+                                    if (running) {
+                                        updateNotification(
+                                            "Reproduciendo · $fmtLabel · " +
+                                                "búfer adaptativo $appliedMs ms"
+                                        )
+                                    }
+                                }
                             }
                         }
                     } else if (
@@ -363,10 +393,15 @@ class AudioStreamService : Service() {
                         if (applied > 0 && applied < bufferFrames) {
                             bufferFrames = applied
                             adaptiveBufferMs = applied * 1000 / rate
-                            updateNotification(
-                                "Reproduciendo · $fmtLabel · búfer adaptativo " +
-                                    "$adaptiveBufferMs ms"
-                            )
+                            val appliedMs = adaptiveBufferMs
+                            mainHandler.post {
+                                if (running) {
+                                    updateNotification(
+                                        "Reproduciendo · $fmtLabel · " +
+                                            "búfer adaptativo $appliedMs ms"
+                                    )
+                                }
+                            }
                         }
                         stableSince = now
                     }
@@ -421,22 +456,33 @@ class AudioStreamService : Service() {
         out.flush()
     }
 
-    private fun maxAdaptiveMs(): Int =
-        if (trackBufferMs > 24) MAX_ADAPTIVE_BUFFER_MS else trackBufferMs
+    /**
+     * Techo del búfer adaptativo para [bufferMs].
+     *
+     * En el perfil de baja latencia (≤ 24 ms) se mantiene el tamaño pequeño
+     * para conservar la ruta rápida de audio. Si el paquete del PC obligó a
+     * subir el búfer por encima de ese umbral, se permite crecer hasta
+     * [MAX_ADAPTIVE_BUFFER_MS] (o más, si el paquete lo exige).
+     */
+    private fun maxAdaptiveMs(bufferMs: Int): Int =
+        if (bufferMs > 24) maxOf(MAX_ADAPTIVE_BUFFER_MS, bufferMs) else bufferMs
 
-    private fun createTrack(rate: Int, channels: Int): AudioTrack {
+    private fun createTrack(
+        rate: Int,
+        channels: Int,
+        bufferMs: Int,
+        maxBufferMs: Int,
+    ): AudioTrack {
         val mask = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         val frameBytes = channels * 2
         val minBytes = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val burst = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 256
 
-        var wantFrames = rate * trackBufferMs / 1000
+        var wantFrames = rate * bufferMs / 1000
         wantFrames = ((wantFrames + burst - 1) / burst * burst).coerceAtLeast(burst)
-        // Capacidad para poder crecer sin recrear el AudioTrack. En el perfil
-        // de baja latencia se mantiene el tamaño mínimo para conservar la
-        // ruta rápida de audio.
-        val maxFrames = rate * maxAdaptiveMs() / 1000
+        // Capacidad para poder crecer sin recrear el AudioTrack.
+        val maxFrames = rate * maxBufferMs / 1000
         val capacityBytes = maxOf(
             minBytes,
             wantFrames * frameBytes,

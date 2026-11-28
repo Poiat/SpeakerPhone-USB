@@ -139,4 +139,4 @@ Sin ellos, el CI publica un APK debug con un aviso. El release incluye `SHA256SU
 - **Sin audio del sistema en Linux:** revisa que PipeWire/PulseAudio esté activo y selecciona el `[Monitor]` de tu salida o el altavoz virtual `Telefono-USB`.
 - **Sin audio del sistema en Windows:** elige `[Sistema / Loopback]`; no requiere cable virtual. Los endpoints 5.1/7.1 se capturan con su formato nativo y se mezclan a estéreo para el móvil. Si el loopback falla, la app no cambia al micrófono: el detalle queda en el registro.
 - **Sin audio del sistema en macOS:** instala `BlackHole 2ch` y selecciónalo como salida de audio.
-- **Cortes o latencia alta:** prueba **Alta estabilidad** o **Máxima estabilidad** y revisa el indicador de underruns y el búfer adaptativo en Android.
+- **Cortes o latencia alta:** prueba **Alta estabilidad** o **Máxima estabilidad** y revisa el indicador de underruns y el búfer adaptativo en Android. El móvil ajusta automáticamente su búfer mínimo al paquete del PC, así que mezclar perfiles de distinto tamaño ya no deja el audio entrecortado.

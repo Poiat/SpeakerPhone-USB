@@ -50,8 +50,9 @@ El protocolo se versiona en el byte `version`. Un cliente con versión distinta
 debe rechazar la sesión y el usuario debe actualizar PC y Android a la misma
 versión. La versión 2 añade el canal de retorno; PC y APK deben actualizarse
 juntos. Desde `0.19`, ambos lados comparten el mismo conjunto de perfiles de
-búfer, pero el búfer de reproducción de Android sigue siendo independiente del
-tamaño de paquete de PC.
+búfer. Desde `0.25.1`, Android garantiza que su búfer de reproducción sea al
+menos `chunk_ms + 16 ms`, de modo que un paquete del PC mayor que el perfil
+elegido en el móvil no deje el `AudioTrack` sin datos.
 
 ## Errores
 

@@ -173,10 +173,10 @@ jobs:
       with:
         generate_release_notes: true
         body: |
-          ### Novedades en 0.25.0
+          ### Novedades en 0.25.1
 
-          - **Telemetría móvil → PC:** protocolo v2 con underruns, búfer adaptativo y backlog cada ~500 ms; visible en la tarjeta de estado de las tres apps de PC.
-          - **Ajuste automático:** el PC sube su búfer un paso (8 → 15 → 30 → 60 ms) cuando el móvil está cerca de su máximo y hay underruns persistentes. El ajuste es temporal y se muestra como `(auto)`.
+          - **Android:** el búfer de reproducción se dimensiona según el paquete real del PC (`chunk_ms + 16 ms`). Antes, un paquete mayor que el perfil del móvil (por ejemplo, 60 ms en el PC con 36 ms en Android) dejaba el `AudioTrack` sin datos y el audio sonaba entrecortado o «ahogado».
+          - **Android:** las actualizaciones de la notificación del búfer adaptativo se envían al hilo principal, sin bloquear el hilo de audio tras un underrun.
           - **Compatibilidad:** PC y APK deben actualizarse juntos (protocolo v2).
-          - **Versión visible:** `v0.25.0` en las apps de PC y en Android.
+          - **Versión visible:** `v0.25.1` en las apps de PC y en Android.
         files: artifacts/*
